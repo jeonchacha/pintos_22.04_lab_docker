@@ -100,6 +100,8 @@ struct list {
    name of the outer structure STRUCT and the member name MEMBER
    of the list element.  See the big comment at the top of the
    file for an example. */
+/* 리스트 노드(struct list_elem)의 포인터로부터,
+   그 노드를 품고 있는 바깥 구조체의 시작 주소를 역추적해서 돌려줌. */
 #define list_entry(LIST_ELEM, STRUCT, MEMBER)           \
 	((STRUCT *) ((uint8_t *) &(LIST_ELEM)->next     \
 		- offsetof (STRUCT, MEMBER.next)))

@@ -107,6 +107,9 @@ struct thread {
 	/* Owned by thread.c. */
 	struct intr_frame tf;               /* Information for switching */
 	unsigned magic;                     /* Detects stack overflow. */
+
+	/* ----- Alarm Clock additions ----- */
+	int64_t wakeup_tick; /* 이 스레드를 깨워야 할 절대 tick (timer_ticks() 기준) */
 };
 
 /* If false (default), use round-robin scheduler.

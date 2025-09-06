@@ -24,10 +24,19 @@ static int64_t ticks;
    Initialized by timer_calibrate(). */
 static unsigned loops_per_tick;
 
+/* ----- Alarm Clock additions ----- */
+static struct list sleep_list; /* 블록된(잠자는) 스레드들의 정렬 리스트 */
+
 static intr_handler_func timer_interrupt;
 static bool too_many_loops (unsigned loops);
 static void busy_wait (int64_t loops);
 static void real_time_sleep (int64_t num, int32_t denom);
+
+/* ----- Alarm Clock additions ----- */
+static bool wakeup_less (const struct list_elem *a,
+			 			 const struct list_elem *b,
+			 			 void *aux);
+static void wake_ready_threads_by_timer (void);
 
 /* Sets up the 8254 Programmable Interval Timer (PIT) to
    interrupt PIT_FREQ times per second, and registers the
@@ -43,6 +52,9 @@ timer_init (void) {
 	outb (0x40, count >> 8);
 
 	intr_register_ext (0x20, timer_interrupt, "8254 Timer");
+
+	/* ----- Alarm Clock additions ----- */
+	list_init(&sleep_list);
 }
 
 /* Calibrates loops_per_tick, used to implement brief delays. */
@@ -88,13 +100,33 @@ timer_elapsed (int64_t then) {
 }
 
 /* Suspends execution for approximately TICKS timer ticks. */
+/* busy-wait 금지 */
 void
 timer_sleep (int64_t ticks) {
-	int64_t start = timer_ticks ();
+	/* 음수/0 처리: 바로 반환 */
+	if (ticks <= 0) return;
 
-	ASSERT (intr_get_level () == INTR_ON);
-	while (timer_elapsed (start) < ticks)
-		thread_yield ();
+	/* 절대 깨울 시간 계산 */
+	int64_t wake_at = timer_ticks () + ticks;
+
+	enum intr_level old_level = intr_disable (); /* 크리티컬 섹션 시작 */
+
+	struct thread *cur = thread_current();
+	cur->wakeup_tick = wake_at;
+
+	/* wakeup_tick 오름차순 유지되도록 정렬 삽입 */
+	list_insert_ordered(&sleep_list, &cur->elem, wakeup_less, NULL);
+
+	/* 현재 스레드를 블록: 이후 타이머 인터럽트에서 언블록됨 
+	   상태 전이: RUNNING -> BLOCKED. 
+	   이 스레드는 타이머 핸들러에서 깨워줄 때까지 CPU를 쓰지 않음(busy-wait 제거).
+	*/
+	thread_block();
+
+	/* 크리티컬 섹션 종료: 인터럽트 상태 복원. 
+	   thread_block() 직전까지 반드시 비활성화 상태 유지해야 "lost wakeup"을 피함.
+	*/
+	intr_set_level (old_level); 
 }
 
 /* Suspends execution for approximately MS milliseconds. */
@@ -121,11 +153,15 @@ timer_print_stats (void) {
 	printf ("Timer: %"PRId64" ticks\n", timer_ticks ());
 }
 
-/* Timer interrupt handler. */
+/* Timer interrupt handler.
+   매 틱마다 깨울 스레드가 있는지 즉시 처리.
+*/
 static void
 timer_interrupt (struct intr_frame *args UNUSED) {
 	ticks++;
 	thread_tick ();
+
+	wake_ready_threads_by_timer ();
 }
 
 /* Returns true if LOOPS iterations waits for more than one timer
@@ -182,5 +218,55 @@ real_time_sleep (int64_t num, int32_t denom) {
 		   down by 1000 to avoid the possibility of overflow. */
 		ASSERT (denom % 1000 == 0);
 		busy_wait (loops_per_tick * num / 1000 * TIMER_FREQ / (denom / 1000));
+	}
+}
+
+/* 정렬 비교 함수: wakeup_tick 오름차순, 동률이면 FIFO(뒤에 삽입) */
+static bool 
+wakeup_less (const struct list_elem *a,
+			 const struct list_elem *b,
+			 void *aux) 
+{
+	const struct thread *ta = list_entry(a, struct thread, elem);
+	const struct thread *tb = list_entry(b, struct thread, elem);
+
+	if (ta->wakeup_tick != tb->wakeup_tick) {
+		return ta->wakeup_tick < tb->wakeup_tick; // 오름차순
+	}
+
+	/* 동률이면 우선순위 큰 스레드를 앞에 */
+	return ta->priority > tb->priority;
+}
+
+/* wakeup loop */
+static void
+wake_ready_threads_by_timer (void)
+{
+	/* 핸들러 문맥: 이미 인터럽트 비활성화 상태.
+	   더 높은 우선순위 스레드를 깨웠는지 추적.
+	*/
+	bool need_yield = false;
+
+	while (!list_empty(&sleep_list)) {
+		/* 정렬 리스트의 맨 앞이 가장 이른 wakeup_tick */
+		struct thread *t = list_entry (list_front (&sleep_list), struct thread, elem);
+
+		/* 지금 깨울 차례가 아니면 종료 (정렬 리스트이므로 맨 앞만 보면 됨) */
+		if (t->wakeup_tick > timer_ticks ()) {
+			break;
+		}
+
+		/* 깨울 시각이 지났다면 리스트에서 빼고 ready로 전환 */
+		list_pop_front (&sleep_list);
+		thread_unblock (t);
+
+		/* 우선순위 스케줄링 대비: 더 높은 우선순위를 깨웠다면 반환 직후 양보 */
+		if (t->priority > thread_current()->priority) {
+			need_yield = true;
+		}
+	}
+
+	if (need_yield) {
+		intr_yield_on_return (); /* 핸들러 '리턴 후' 양보 (인터럽트 안에서 yield 금지 -> 문맥상 불가) */
 	}
 }
