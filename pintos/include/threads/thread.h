@@ -110,6 +110,18 @@ struct thread {
 
 	/* ----- Alarm Clock additions ----- */
 	int64_t wakeup_tick; /* 이 스레드를 깨워야 할 절대 tick (timer_ticks() 기준) */
+
+	/* 원래 우선순위(사용자 설정값) */
+	int base_priority; 
+
+	/* 나에게 우선순위를 기부한 스레드들의 리스트 */
+	struct list donations; /* elements: donor->donation_elem */
+
+	/* 내가 남에게 기부자로 들어갈 때 사용할 리스트 노드 (단일 용도) */
+	struct list_elem donation_elem;
+
+	/* 지금 대기 중인 락 (없으면 NULL). 중첩 기부 전파용 */
+	struct lock *wait_on_lock;
 };
 
 /* If false (default), use round-robin scheduler.
@@ -118,7 +130,7 @@ struct thread {
 extern bool thread_mlfqs;
 
 void thread_init (void);
-void thread_start (void);
+void thread_start (void);	
 
 void thread_tick (void);
 void thread_print_stats (void);
@@ -145,5 +157,13 @@ int thread_get_recent_cpu (void);
 int thread_get_load_avg (void);
 
 void do_iret (struct intr_frame *tf);
+
+bool thread_cmp_priority (const struct list_elem *a,
+                     	  const struct list_elem *b,
+                     	  void *aux UNUSED);
+
+void thread_refresh_priority(struct thread *t);
+void thread_remove_donations_for_lock(struct thread *t, struct lock *lock);
+void thread_resort_ready_member(struct thread *t);
 
 #endif /* threads/thread.h */

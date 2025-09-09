@@ -207,6 +207,11 @@ thread_create (const char *name, int priority,
 	/* Add to run queue. */
 	thread_unblock (t);
 
+	/* 새 스레드의 우선순위가 더 높으면 현재 스레드 선점 */
+	if (t->priority > thread_current()->priority) {
+		thread_yield();
+	}
+
 	return tid;
 }
 
@@ -240,7 +245,10 @@ thread_unblock (struct thread *t) {
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
-	list_push_back (&ready_list, &t->elem);
+
+	/* ready_list에 정렬 삽입 적용 */
+	list_insert_ordered(&ready_list, &t->elem, thread_cmp_priority, NULL);
+
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
 }
@@ -302,8 +310,11 @@ thread_yield (void) {
 	ASSERT (!intr_context ());
 
 	old_level = intr_disable ();
+
 	if (curr != idle_thread)
-		list_push_back (&ready_list, &curr->elem);
+		/* ready로 되돌릴 때도 정렬 삽입 */
+		list_insert_ordered (&ready_list, &curr->elem, thread_cmp_priority, NULL);
+
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
 }
@@ -311,7 +322,23 @@ thread_yield (void) {
 /* Sets the current thread's priority to NEW_PRIORITY. */
 void
 thread_set_priority (int new_priority) {
-	thread_current ()->priority = new_priority;
+	enum intr_level old = intr_disable();
+	struct thread *cur = thread_current();
+
+	cur->base_priority = new_priority;
+	thread_refresh_priority(cur);			/* donation 고려한 effective 반영 */
+	thread_resort_ready_member(cur);		/* ready_list 안에 있었다면 재정렬 */
+
+	/* 내가 더 이상 최고 우선순위가 아니라면 즉시 양보 */
+	if (!list_empty(&ready_list)) {
+		struct thread *top = list_entry(list_front(&ready_list), struct thread, elem);
+		
+		if (top->priority > cur->priority) {
+			thread_yield();
+		}
+	}
+
+	intr_set_level(old);
 }
 
 /* Returns the current thread's priority. */
@@ -409,6 +436,10 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->tf.rsp = (uint64_t) t + PGSIZE - sizeof (void *);
 	t->priority = priority;
 	t->magic = THREAD_MAGIC;
+
+	t->base_priority = priority;
+	list_init(&(t->donations));
+	t->wait_on_lock = NULL;
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should
@@ -587,4 +618,61 @@ allocate_tid (void) {
 	lock_release (&tid_lock);
 
 	return tid;
+}
+
+/* Highest-priority-first ordering for ready_list (no donation yet).
+ * ready_list용 비교 함수.
+ */
+bool
+thread_cmp_priority (const struct list_elem *a,
+                     const struct list_elem *b,
+                     void *aux UNUSED) 
+{
+	const struct thread *ta = list_entry (a, struct thread, elem);
+	const struct thread *tb = list_entry (b, struct thread, elem);
+	
+	return ta->priority > tb->priority; /* 높은 priority가 앞 */
+}
+
+/* (A) 현재 스레드의 effective priority 재계산:
+	base_priority와 donations의 donor들 중 최댓값을 취함. */
+void
+thread_refresh_priority(struct thread *t) {
+	int maxp = t->base_priority;
+	/* donations를 순회하며 donor->priority의 최댓값 반영 */
+	struct list_elem *e;
+	for (e = list_begin(&(t->donations)); e != list_end(&(t->donations)); e = list_next(e)) {
+		struct thread *donor = list_entry(e, struct thread, donation_elem);
+		if (donor->priority > maxp) {
+			maxp = donor->priority;
+		}
+	}
+	t->priority = maxp;
+}
+
+/* (B) t가 보유 중인 lock L 때문에 받았던 donation들을 제거 */
+void
+thread_remove_donations_for_lock(struct thread *t, struct lock *lock) {
+	struct list_elem *e = list_begin(&(t->donations));
+	while (e != list_end(&(t->donations))) {
+		struct thread *donor = list_entry(e, struct thread, donation_elem);
+		struct list_elem *next = list_next(e);
+		if (donor->wait_on_lock == lock) {
+			list_remove(e);
+		}
+		e = next;
+	}
+}
+
+/* (C) ready_list 안에 있는 스레드 t의 위치 재정렬(유효 우선순위 변동 대응) */
+void
+thread_resort_ready_member(struct thread *t) {
+	enum intr_level old = intr_disable();
+
+	if (t->status == THREAD_READY) {
+		list_remove(&(t->elem));
+		list_insert_ordered(&ready_list, &(t->elem), thread_cmp_priority, NULL);
+	}
+	
+	intr_set_level(old);
 }

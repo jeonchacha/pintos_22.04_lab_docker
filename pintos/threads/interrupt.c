@@ -263,6 +263,10 @@ intr_context (void) {
    interrupt handler to yield to a new process just before
    returning from the interrupt.  May not be called at any other
    time. */
+/* intr_yield_on_return()은 인터럽트 처리 중 
+   “지금 당장 스케줄러를 돌리진 말고, 인터럽트에서 복귀하기 직전에 한 번 양보(yield)해라”라는 
+   지연된 컨텍스트 스위치 요청을 남기는 함수
+*/
 void
 intr_yield_on_return (void) {
 	ASSERT (intr_context ());

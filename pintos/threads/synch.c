@@ -32,6 +32,9 @@
 #include "threads/interrupt.h"
 #include "threads/thread.h"
 
+static bool donations_contains (struct list *lst, struct thread *t);
+static void propagate_donation(struct thread *donor);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -56,7 +59,8 @@ sema_init (struct semaphore *sema, unsigned value) {
    interrupt handler.  This function may be called with
    interrupts disabled, but if it sleeps then the next scheduled
    thread will probably turn interrupts back on. This is
-   sema_down function. */
+   sema_down function.
+   자원 획득(P, wait), 없으면 잠들어 기다림. */
 void
 sema_down (struct semaphore *sema) {
 	enum intr_level old_level;
@@ -66,7 +70,8 @@ sema_down (struct semaphore *sema) {
 
 	old_level = intr_disable ();
 	while (sema->value == 0) {
-		list_push_back (&sema->waiters, &thread_current ()->elem);
+		/* waiters를 높은 priority 먼저가 되도록 정렬 삽입 */
+		list_insert_ordered(&sema->waiters, &thread_current ()->elem, thread_cmp_priority, NULL);
 		thread_block ();
 	}
 	sema->value--;
@@ -101,19 +106,39 @@ sema_try_down (struct semaphore *sema) {
 /* Up or "V" operation on a semaphore.  Increments SEMA's value
    and wakes up one thread of those waiting for SEMA, if any.
 
-   This function may be called from an interrupt handler. */
+   This function may be called from an interrupt handler.
+   자원 반납(V, signal), 가장 우선순위 높은 대기자를 깨우고 필요 시 즉시 선점 */
 void
 sema_up (struct semaphore *sema) {
 	enum intr_level old_level;
+	struct thread *unblocked = NULL;
 
 	ASSERT (sema != NULL);
 
 	old_level = intr_disable ();
-	if (!list_empty (&sema->waiters))
-		thread_unblock (list_entry (list_pop_front (&sema->waiters),
-					struct thread, elem));
+	
+	if (!list_empty (&sema->waiters)) {
+		/* 대기 중 donation으로 우선순위가 변동될 수 있음.
+		   sema_down()에서 정렬 삽입을 했더라도, 그 순서가 낡을 수 있음.
+		   -> 팝 직전 재정렬로 최신화
+		*/
+		list_sort(&(sema->waiters), thread_cmp_priority, NULL);
+
+		/* 최고 우선순위 깨우기 -> sema_down에서 항상 정렬 삽입했으므로 앞(front)이 최고 우선순위 */
+		unblocked = list_entry (list_pop_front (&sema->waiters), struct thread, elem);
+		thread_unblock (unblocked);
+	}
+		
 	sema->value++;
 	intr_set_level (old_level);
+
+	/* 즉시 선점 if a higher-priority thread was unblocked. */
+	if (unblocked != NULL && unblocked->priority > thread_current ()->priority) {
+		if (intr_context ()) /* 인터럽트 문맥 */
+			intr_yield_on_return(); 
+		else /* 스레드 문맥 */
+			thread_yield();
+	}
 }
 
 static void sema_test_helper (void *sema_);
@@ -188,7 +213,23 @@ lock_acquire (struct lock *lock) {
 	ASSERT (!intr_context ());
 	ASSERT (!lock_held_by_current_thread (lock));
 
+	enum intr_level old = intr_disable();
+
+	if (lock->holder != NULL && thread_current() != lock->holder) {
+		/* 현재 스레드는 이 lock을 기다린다. */
+		thread_current()->wait_on_lock = lock;
+
+		/* donation 전파 (H->...->L) */
+		propagate_donation(thread_current());
+	}
+
+	intr_set_level(old);
+
+	/* 자원 획득 */
 	sema_down (&lock->semaphore);
+
+	/* lock을 얻었으므로 더는 대기 아님 */
+	thread_current()->wait_on_lock = NULL;
 	lock->holder = thread_current ();
 }
 
@@ -218,10 +259,17 @@ lock_try_acquire (struct lock *lock) {
    make sense to try to release a lock within an interrupt
    handler. */
 void
-lock_release (struct lock *lock) {
+lock_release (struct lock *lock) { /* 락 회수 */
 	ASSERT (lock != NULL);
 	ASSERT (lock_held_by_current_thread (lock));
 
+	/* 1) 이 lock 때문에 받았던 donation 제거 */
+	thread_remove_donations_for_lock(thread_current(), lock);
+
+	/* 2) 내 effective priority 재계산 (남은 donation + base) */
+	thread_refresh_priority(thread_current());
+
+	/* 3) 실제로 lock을 반납하고 대기자 깨우기 */
 	lock->holder = NULL;
 	sema_up (&lock->semaphore);
 }
@@ -320,4 +368,50 @@ cond_broadcast (struct condition *cond, struct lock *lock) {
 
 	while (!list_empty (&cond->waiters))
 		cond_signal (cond, lock);
+}
+
+/* Return true if list 'lst' already contains thread t via donation_elem. */
+static bool
+donations_contains (struct list *lst, struct thread *t) {
+	struct list_elem *e;
+	for (e = list_begin (lst); e != list_end (lst); e = list_next (e)) {
+		if (list_entry (e, struct thread, donation_elem) == t) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* donor(=current)가 어떤 lock을 기다릴 때, holder 체인으로 우선순위를 전파 */
+static void 
+propagate_donation(struct thread *donor) {
+	int depth = 0;
+	struct lock *lock = donor->wait_on_lock;
+
+	while (lock && depth++ < 8) { /* 깊이 제한 8 -> 순환/무한 전파 방지 */
+		struct thread *holder = lock->holder;
+		if (holder == NULL) break;
+
+		/* 1) holder의 donations에 donor를 연결 
+			  -> 중복 방지: donor->donation_elem이 이미 들어가 있다면 재삽입 X */
+		if (!donations_contains(&(holder->donations), donor)) {
+			/* 정렬 유지 안함. 최댓값은 refresh_priority가 전체 순회로 해결. */
+			list_push_back(&(holder->donations), &(donor->donation_elem));
+		}
+    	
+		/* 2) holder의 effective priority를 donor 기준으로 끌어올림 */
+		int before = holder->priority;
+		thread_refresh_priority(holder);
+
+		/* 3) holder가 ready_list 안에 있으면 재정렬 */
+		if (holder->priority != before) {
+			thread_resort_ready_member(holder);
+		}
+
+		/* 4) 다음 단계(중첩 기부): holder도 어떤 lock을 기다리면 체인 위로 계속 */
+		lock = holder->wait_on_lock;
+
+		/* 다음 단계 donor는 holder로 갱신 */
+		donor = holder;
+	}
 }

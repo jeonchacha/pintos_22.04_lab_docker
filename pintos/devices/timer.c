@@ -221,7 +221,7 @@ real_time_sleep (int64_t num, int32_t denom) {
 	}
 }
 
-/* 정렬 비교 함수: wakeup_tick 오름차순, 동률이면 FIFO(뒤에 삽입) */
+/* 정렬 비교 함수: wakeup_tick 오름차순, 동률이면 FIFO(뒤에 삽입) 또는 우선순위 */
 static bool 
 wakeup_less (const struct list_elem *a,
 			 const struct list_elem *b,
