@@ -35,6 +35,10 @@
 static bool donations_contains (struct list *lst, struct thread *t);
 static void propagate_donation(struct thread *donor);
 
+static bool cond_waiter_more_prio(const struct list_elem *a,
+                                  const struct list_elem *b,
+                                  void *aux);
+
 /* Initializes semaphore SEMA to VALUE.  A semaphore is a
    nonnegative integer along with two atomic operators for
    manipulating it:
@@ -350,9 +354,13 @@ cond_signal (struct condition *cond, struct lock *lock UNUSED) {
 	ASSERT (!intr_context ());
 	ASSERT (lock_held_by_current_thread (lock));
 
-	if (!list_empty (&cond->waiters))
-		sema_up (&list_entry (list_pop_front (&cond->waiters),
-					struct semaphore_elem, elem)->semaphore);
+	if (!list_empty (&cond->waiters)) {
+		/* 현재 시점의 유효 우선순위 기준으로 가장 높은 waiter 선택 */
+		list_sort (&(cond->waiters), cond_waiter_more_prio, NULL);
+		struct semaphore_elem *se =
+			list_entry (list_pop_front (&cond->waiters), struct semaphore_elem, elem);
+		sema_up (&(se->semaphore));
+	}
 }
 
 /* Wakes up all threads, if any, waiting on COND (protected by
@@ -414,4 +422,35 @@ propagate_donation(struct thread *donor) {
 		/* 다음 단계 donor는 holder로 갱신 */
 		donor = holder;
 	}
+}
+
+/* condvar의 각 원소 semephore_elem 안에는 개별 세마포어가 있고,
+   실제로 잠들어 있는 스레드는 sema_elem.semaphore.waiters에 있다.
+   즉, cond_signal()에서 누굴 깨울지는 각 semaphore_elem이 깨어나게 만들 대상 스레드의 우선순위로 비교해야 한다.
+*/
+static bool 
+cond_waiter_more_prio(const struct list_elem *a, const struct list_elem *b, void *aux) {
+	const struct semaphore_elem *sa = list_entry(a, struct semaphore_elem, elem);
+	const struct semaphore_elem *sb = list_entry(b, struct semaphore_elem, elem);
+	int pa = PRI_MIN, pb = PRI_MIN;
+
+	/* sa 내부 대기자 중 최대 priority */
+	for (struct list_elem *e = list_begin(&(sa->semaphore.waiters));
+		 e != list_end(&(sa->semaphore.waiters)); e = list_next(e)) {
+		int pr = list_entry(e, struct thread, elem)->priority;
+		if (pr > pa) {
+			pa = pr;
+		} 
+	}
+
+	/* sb 내부 대기자 중 최대 priority */
+	for (struct list_elem *e = list_begin(&(sb->semaphore.waiters));
+		 e != list_end(&(sb->semaphore.waiters)); e = list_next(e)) {
+		int pr = list_entry(e, struct thread, elem)->priority;
+		if (pr > pb) {
+			pb = pr;
+		} 
+	}
+	
+	return pa > pb;
 }
