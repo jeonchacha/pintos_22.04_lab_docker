@@ -333,10 +333,13 @@ cond_wait (struct condition *cond, struct lock *lock) {
 	ASSERT (!intr_context ());
 	ASSERT (lock_held_by_current_thread (lock));
 
+	/* 의도적으로 0으로 초기화 후 */
 	sema_init (&waiter.semaphore, 0);
 	list_push_back (&cond->waiters, &waiter.elem);
 	lock_release (lock);
+	/* 스스로 잠들기 위함 */
 	sema_down (&waiter.semaphore);
+	/* 시그널로 깨어나면 다시 락 획득 */
 	lock_acquire (lock);
 }
 

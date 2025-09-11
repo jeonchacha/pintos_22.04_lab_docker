@@ -30,6 +30,7 @@ bool lock_held_by_current_thread (const struct lock *);
 
 /* Condition variable. */
 struct condition {
+	/* 스레드가 아니라 semaphore_elem 임. */
 	struct list waiters;        /* List of waiting threads. */
 };
 
