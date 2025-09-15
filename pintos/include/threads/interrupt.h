@@ -15,6 +15,13 @@ enum intr_level intr_set_level (enum intr_level);
 enum intr_level intr_enable (void);
 enum intr_level intr_disable (void);
 
+/*
+	인터럽트 프레임 사이즈: 192
+	gp_registers 사이즈: 120
+	uint16_t 사이즈: 2
+	uint32_t 사이즈: 4
+	uintptr_t 사이즈: 8
+*/
 /* Interrupt stack frame. */
 struct gp_registers {
 	uint64_t r15;
@@ -37,27 +44,27 @@ struct gp_registers {
 struct intr_frame {
 	/* Pushed by intr_entry in intr-stubs.S.
 	   These are the interrupted task's saved registers. */
-	struct gp_registers R;
+	struct gp_registers R;	// 범용 레지스터 - 120 바이트
 	uint16_t es;
 	uint16_t __pad1;
 	uint32_t __pad2;
-	uint16_t ds;
+	uint16_t ds; 			// 세그먼트 관리
 	uint16_t __pad3;
 	uint32_t __pad4;
 	/* Pushed by intrNN_stub in intr-stubs.S. */
-	uint64_t vec_no; /* Interrupt vector number. */
+	uint64_t vec_no; /* Interrupt vector number. 인터럽트 종류 */
 /* Sometimes pushed by the CPU,
    otherwise for consistency pushed as 0 by intrNN_stub.
    The CPU puts it just under `eip', but we move it here. */
 	uint64_t error_code;
 /* Pushed by the CPU.
    These are the interrupted task's saved registers. */
-	uintptr_t rip;
-	uint16_t cs;
+	uintptr_t rip;			// PC
+	uint16_t cs;			// 세그먼트 관리
 	uint16_t __pad5;
 	uint32_t __pad6;
-	uint64_t eflags;
-	uintptr_t rsp;
+	uint64_t eflags;		// cpu 상태를 나타내는 정보
+	uintptr_t rsp;			// 스택 포인터
 	uint16_t ss;
 	uint16_t __pad7;
 	uint32_t __pad8;

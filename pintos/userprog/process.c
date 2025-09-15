@@ -330,15 +330,38 @@ load (const char *file_name, struct intr_frame *if_) {
 	int i;
 
 	/* Allocate and activate page directory. */
-	t->pml4 = pml4_create ();
+	t->pml4 = pml4_create ();				// 페이지 디렉토리 생성. page map level 4
 	if (t->pml4 == NULL)
 		goto done;
-	process_activate (thread_current ());
+	process_activate (thread_current ());	// 페이지 테이블 활성화
 
-	/* Open executable file. */
-	file = filesys_open (file_name);
+	/* 
+		Pintos의 페이지 할당기에서 한 페이지(4KiB) 를 빌려오는 함수
+		인자 flags는 옵션 비트마스크:
+			PAL_ZERO -> 할당된 페이지를 0으로 초기화
+			PAL_USER -> user 풀에서 가져옴(스택 페이지처럼 사용자 매핑에 쓸 때)
+			0이면 커널 풀에서, 제로 초기화 없이 한 페이지를 가져옴.
+	*/
+	char *buf = palloc_get_page (0);
+	if (buf == NULL) goto done;
+	strlcpy (buf, file_name, PGSIZE);
+
+	/* tokenize */
+	char *argv_tok[64];		// args-many 도 충분
+	int argc = 0;
+	char *save_ptr = NULL;
+	for (char *t = strtok_r (buf, " ", &save_ptr);
+		 t && argc < 64; t = strtok_r (NULL, " ", &save_ptr)) 
+	{
+		argv_tok[argc++] = t;
+	}
+
+	if (argc == 0) goto done;	// 토큰 0개 처리
+	
+	/* Open executable file. -> first token (program name) */
+	file = filesys_open (argv_tok[0]);		// 프로그램 파일 open
 	if (file == NULL) {
-		printf ("load: %s: open failed\n", file_name);
+		printf ("load: %s: open failed\n", argv_tok[0]);
 		goto done;
 	}
 
@@ -416,11 +439,51 @@ load (const char *file_name, struct intr_frame *if_) {
 
 	/* TODO: Your code goes here.
 	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+	uint64_t rsp = (uint64_t) USER_STACK;	// x86-64에서 포인터/레지스터는 64비트
+	const uint64_t UBASE = (uint64_t) USER_STACK - PGSIZE;	// 스택은 1페이지만 매핑, 유효범위 = [BASE, TOP)
+	uint64_t arg_addr[64];
+
+	/* 1) strings (reverse) */
+	for (int i = argc - 1; i >= 0; i--) {
+		size_t len = strlen (argv_tok[i]) + 1;	// +1은 \0때문
+		if (rsp < UBASE + len) goto done; 		// 페이지 경계 체크
+		rsp -= len;
+		memcpy ((void *) rsp, argv_tok[i], len);
+		arg_addr[i] = rsp;						// 포인터 값
+	}
+
+	/* 2) align */
+	rsp &= ~0x7ULL;
+
+	/* 3) argv[argc] = NULL */
+	if (rsp < UBASE + 8) goto done; 
+	rsp -= 8;
+	*(uint64_t *) rsp = 0;
+
+	/* 4) argv pointers (reverse) -> argv[0]이 가장 낮은 슬롯 */
+	for (int i = argc - 1; i >= 0; i--) {
+		if (rsp < UBASE + 8) goto done; 		
+		rsp -= 8;
+		*(uint64_t *) rsp = (uint64_t) arg_addr[i];
+	}
+	uint64_t argv_ptr = rsp;
+
+	/* 5) fake return */
+	if (rsp < UBASE + 8) goto done; 		
+	rsp -= 8;
+	*(uint64_t *) rsp = 0;
+
+	/* 6) pass regs */
+	if_->R.rdi = (uint64_t) argc;
+	if_->R.rsi = (uint64_t) argv_ptr;
+	if_->rsp   = (uint64_t) rsp;
 
 	success = true;
 
 done:
 	/* We arrive here whether the load is successful or not. */
+	if (buf) palloc_free_page (buf);
+
 	file_close (file);
 	return success;
 }

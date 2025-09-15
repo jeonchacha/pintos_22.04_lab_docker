@@ -457,12 +457,12 @@ next_thread_to_run (void) {
 
 /* Use iretq to launch the thread */
 void
-do_iret (struct intr_frame *tf) {
-	__asm __volatile(
-			"movq %0, %%rsp\n"
-			"movq 0(%%rsp),%%r15\n"
-			"movq 8(%%rsp),%%r14\n"
-			"movq 16(%%rsp),%%r13\n"
+do_iret (struct intr_frame *tf) {		// 문맥 교환시 호출 -> 인자로 들어온 인터럽트 프레임내의 정보를 CPU로 복원.
+	__asm __volatile(					// 최적화 장벽 -> 컴파일러가 최적화를 수행할 때 이 부분은 건드리지 말라고 명시하는 역할.
+			"movq %0, %%rsp\n"			// 인자로 들어온 *tf의 주소를 CPU의 rsp에 저장.
+			"movq 0(%%rsp),%%r15\n"		// rsp 위치의 값을 레지스터 r15에 저장.
+			"movq 8(%%rsp),%%r14\n"		// rsp + 8 의 위치의 값을 레지스터 r14에 저장.
+			"movq 16(%%rsp),%%r13\n"	// ...
 			"movq 24(%%rsp),%%r12\n"
 			"movq 32(%%rsp),%%r11\n"
 			"movq 40(%%rsp),%%r10\n"
@@ -475,12 +475,17 @@ do_iret (struct intr_frame *tf) {
 			"movq 96(%%rsp),%%rcx\n"
 			"movq 104(%%rsp),%%rbx\n"
 			"movq 112(%%rsp),%%rax\n"
-			"addq $120,%%rsp\n"
-			"movw 8(%%rsp),%%ds\n"
-			"movw (%%rsp),%%es\n"
-			"addq $32, %%rsp\n"
-			"iretq"
-			: : "g" ((uint64_t) tf) : "memory");
+			"addq $120,%%rsp\n"			// rsp에 120(gp_registers의 크기)을 더함.
+			"movw 8(%%rsp),%%ds\n"		// rsp + 8 위치의 값을 레지스터 ds에 저장.
+			"movw (%%rsp),%%es\n"		// rsp 위치의 값으 레지스터 es에 저장.
+			"addq $32, %%rsp\n"			// rsp의 값을 32만큼 증가 -> 이제 rsp는 rip를 가리킴.
+			"iretq"						/* 아직 인터럽트 프레임에서 CPU로 복원되지 않은 정보: rip, cs, eflags, rsp, ss 를 복원해주는 것은 iretq 인스트럭션이 실행.
+										   iretq 인스트럭션은 인터럽트 프레임의 rip값을 복원함으로서 기존에 수행하던 스레드의 다음 실행 명령을 실행하는 역할인데, 이 rip가 유저프로세의
+										   rip 값을 갖고 있는 경우 CPU는 유저프로세스의 다음 실행 명령을 실행하게 된다.
+										   유저모드에서 커널모드로 넘어와서 do_iret을 실행하고 있는 경우에 이 인터럽트 프레임 구조체 안에 있는 rsp는 유저스택의 rsp 이기 때문에
+										   이 rsp가 다시 CPU로 복원 되면서 커널모드->유저모드로 복귀하개 됨.
+										*/
+			: : "g" ((uint64_t) tf) : "memory"); // g는 인자. 즉, 0번째 인자로 (uint64_t) tf를 넣는다는 것
 }
 
 /* Switching the thread by activating the new thread's page

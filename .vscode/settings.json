@@ -1,0 +1,8 @@
+{
+    "files.associations": {
+        "syscall.h": "c",
+        "lib.h": "c",
+        "boundary.h": "c",
+        "main.h": "c"
+    }
+}

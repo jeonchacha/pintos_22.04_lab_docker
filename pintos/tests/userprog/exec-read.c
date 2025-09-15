@@ -16,16 +16,16 @@ test_main (void)
   int byte_cnt;
   char *buffer;
 
-  CHECK ((handle = open ("sample.txt")) > 1, "open \"sample.txt\"");
-  buffer = get_boundary_area () - sizeof sample / 2;
-  CHECK ((byte_cnt = read (handle, buffer, 20)) == 20,
+  CHECK ((handle = open ("sample.txt")) > 1, "open \"sample.txt\""); 
+  buffer = get_boundary_area () - sizeof sample / 2; /* 일부러 시작 주소를 페이지 끝 근처로 잡음 */
+  CHECK ((byte_cnt = read (handle, buffer, 20)) == 20, /* 첫 페이지 말단 */
          "read \"sample.txt\" first 20 bytes");
 
   
   if ((pid = fork ("child-read"))){
     wait (pid);
 
-    byte_cnt = read (handle, buffer + 20, sizeof sample - 21);
+    byte_cnt = read (handle, buffer + 20, sizeof sample - 21); /* 다음 페이지로 이어지도록 */
     if (byte_cnt != sizeof sample - 21)
       fail ("read() returned %d instead of %zu", byte_cnt, sizeof sample - 21);
     else if (strcmp (sample, buffer)) {
@@ -43,3 +43,4 @@ test_main (void)
     exec (cmd_line);
   }
 }
+/* 유저 버퍼가 페이지 경계를 가로질러도 read()가 안전하게 복사해야 한다. */
