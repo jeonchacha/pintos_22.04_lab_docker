@@ -21,6 +21,8 @@
 #ifdef VM
 #include "vm/vm.h"
 #endif
+#include "threads/malloc.h"
+#include "threads/synch.h"
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
@@ -38,6 +40,10 @@ process_init (void) {
  * before process_create_initd() returns. Returns the initd's
  * thread id, or TID_ERROR if the thread cannot be created.
  * Notice that THIS SHOULD BE CALLED ONCE. */
+/* "initd"라는 첫 번째 사용자 프로그램이 FILE_NAME에서 로드되어 시작됩니다.
+ *	새로운 스레드는 process_create_initd() 함수가 반환되기 전에 이미 스케줄링되거나 종료될 수도 있습니다. 
+ *	이 함수는 initd의 스레드 ID를 반환하며, 스레드를 생성할 수 없는 경우 TID_ERROR를 반환합니다.
+ *	주의: 이 함수는 단 한 번만 호출되어야 합니다. */
 tid_t
 process_create_initd (const char *file_name) {
 	char *fn_copy;
@@ -50,23 +56,80 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
-	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
-	if (tid == TID_ERROR)
+	/* 부모 쪽 wait_status 준비 및 children 등록 */
+	struct wait_status *w = malloc (sizeof (*w));
+	if (w == NULL) {
 		palloc_free_page (fn_copy);
+		return TID_ERROR;
+	}
+	w->tid = TID_ERROR;			/* 아직 thread_create()를 호출하기 전이라 자식 TID를 모름. */
+	w->exit_status = 0;			/* 실제 값은 자식이 exit(status) 호출할 때 sys_exit()에서 기록. */
+	w->ref_cnt = 2;				/* 참조 카운트: 이 객체는 부모 1 + 자식 1, 두 쪽이 공유하므로 초기값 2. 
+								 * 이후 해제 타이밍:
+								 * 부모가 process_wait()을 마치면 --ref_cnt
+								 * 자식이 sys_exit()에서 정리할 때 --ref_cnt
+								 * 0이 되면 free(w) (둘 다 손을 뗀 시점) */
+	w->dead = false;			/* 자식이 exit()를 호출하면 sys_exit()에서 true로 바꾸고 부모를 깨움. */
+	sema_init (&w->sema, 0);	/* 세마포어 초기값 0: 부모가 process_wait()에서 sema_down() 하면 즉시 블록됨.
+								 * 자식이 종료할 때 sys_exit()에서 sema_up(&w->sema) 호출 → 부모 대기 해제. */
+
+	/* initd에 넘길 aux(파일명 페이지, wstatus) */
+	struct {
+		char *fname;
+		struct wait_status *w;
+	} *aux = malloc (sizeof (*aux));
+	if (aux == NULL) {
+		free(w);
+		palloc_free_page (fn_copy);
+		return TID_ERROR;
+	}
+	aux->fname = fn_copy;
+	aux->w = w;
+
+	/* Create a new thread to execute FILE_NAME. */
+	tid = thread_create (file_name, PRI_DEFAULT, initd, aux);
+	if (tid == TID_ERROR) {
+		free(aux);
+		free(w);
+		palloc_free_page (fn_copy);
+		return TID_ERROR;
+	}
+		
+	/* tid 기록, 내 children 리스트에 등록 */
+	w->tid = tid;
+	list_push_back (&(thread_current ()->children), &(w->elem));
 	return tid;
 }
 
 /* A thread function that launches first user process. */
+/* 사용자 프로세스를 처음으로 실행하는 스레드 함수. */
 static void
-initd (void *f_name) {
+initd (void *aux_) {
 #ifdef VM
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
 
-	process_init ();
+	// process_init ();
 
-	if (process_exec (f_name) < 0)
+	/* 자식 스레드 입장에서 내 wstatus 연결 */
+
+	// 1) 부모가 보낸 포인터를 우리가 아는 구조체로 캐스팅
+	struct {
+		char *fname;
+		struct wait_status *w;
+	} *aux = aux_;
+
+	// 2) 필요한 포인터 값들을 '지역 변수'로 먼저 빼둠
+	char *fname = aux->fname;
+	struct wait_status *w = aux->w;
+
+	// 3) 래퍼(struct …)* aux 자체는 이제 필요 없으니 여기서 바로 해제
+	free (aux); 
+
+	// 4) 빼둔 값 사용: 내 wstatus 연결
+	thread_current ()->wstatus = w;
+
+	if (process_exec (fname) < 0) // 5) exec 호출: 여기서 성공하면 더는 initd로 돌아오지 않음
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
 }
@@ -199,12 +262,41 @@ process_exec (void *f_name) {
  *
  * This function will be implemented in problem 2-2.  For now, it
  * does nothing. */
+
+/* 지정된 스레드(TID)가 종료될 때까지 기다렸다가 해당 스레드의 종료 상태를 반환합니다. 
+ * 만약 스레드가 커널에 의해 (예: 예외로 인해) 종료되었다면 -1을 반환합니다. 
+ * TID가 유효하지 않거나, 호출한 프로세스의 자식이 아니거나, 
+ * 이미 해당 TID에 대해 process_wait()가 성공적으로 호출되었다면, 
+ * 기다리지 않고 즉시 -1을 반환합니다. */
 int
-process_wait (tid_t child_tid UNUSED) {
-	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
-	 * XXX:       to add infinite loop here before
-	 * XXX:       implementing the process_wait. */
-	return -1;
+process_wait (tid_t child_tid) {
+	struct thread *cur = thread_current ();
+	struct list_elem *e;
+	struct wait_status *w = NULL;
+
+	/* 내 자식인지 찾기 */
+	for (e = list_begin (&(cur->children)); e != list_end (&(cur->children)); e = list_next (e)) {
+		struct wait_status *cand = list_entry (e, struct wait_status, elem);
+		if (cand->tid == child_tid) {
+			w = cand;
+			break;
+		}
+	}
+	if (w == NULL) return -1;		/* 내 자식 아님 또는 이미 기다림 */
+
+	/* 이중 wait 방지: 리스트에서 제거 */
+	list_remove (&w->elem);
+
+	/* 자식 종료까지 대기 (이미 종료면 바로 통과) */
+	if (!w->dead) {
+		sema_down (&(w->sema));
+	}
+
+	int status = w->exit_status;
+	if (--w->ref_cnt == 0) {
+		free(w);
+	}
+	return status;
 }
 
 /* Exit the process. This function is called by thread_exit (). */
@@ -216,6 +308,16 @@ process_exit (void) {
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
+	/* 내가 아직 wait하지 않은 자식들의 wstatus 정리 (부모 선종료 케이스) */
+	struct list_elem *e, *next;
+	for (e = list_begin (&(curr->children)); e != list_end (&(curr->children)); e = next) {
+		next = list_next (e);
+		struct wait_status *w = list_entry (e, struct wait_status, elem);
+		list_remove (&(w->elem)); // 자식 목록에서 참조만 끊음. 자식 스레드는 그대로 잘 돌아감.
+		if (--w->ref_cnt == 0) {
+			free (w);
+		}
+	}
 	process_cleanup ();
 }
 
@@ -357,7 +459,9 @@ load (const char *file_name, struct intr_frame *if_) {
 	}
 
 	if (argc == 0) goto done;	// 토큰 0개 처리
-	
+	/* 중요!! 토큰화 후 첫 토큰을 스레드 이름으로: 테스트 출력은 program: exit(N) 형태를 기대하므로. */
+	strlcpy (thread_current()->name, argv_tok[0], sizeof thread_current()->name); 
+
 	/* Open executable file. -> first token (program name) */
 	file = filesys_open (argv_tok[0]);		// 프로그램 파일 open
 	if (file == NULL) {
@@ -452,7 +556,7 @@ load (const char *file_name, struct intr_frame *if_) {
 		arg_addr[i] = rsp;						// 포인터 값
 	}
 
-	/* 2) align */
+	/* 2) 8B align */
 	rsp &= ~0x7ULL;
 
 	/* 3) argv[argc] = NULL */
@@ -484,7 +588,7 @@ done:
 	/* We arrive here whether the load is successful or not. */
 	if (buf) palloc_free_page (buf);
 
-	file_close (file);
+	if (file) file_close (file);
 	return success;
 }
 

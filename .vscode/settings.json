@@ -3,6 +3,8 @@
         "syscall.h": "c",
         "lib.h": "c",
         "boundary.h": "c",
-        "main.h": "c"
+        "main.h": "c",
+        "syscall-nr.h": "c",
+        "synch.h": "c"
     }
 }

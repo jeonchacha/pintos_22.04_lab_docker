@@ -8,8 +8,14 @@
 #include "threads/flags.h"
 #include "intrinsic.h"
 
+#include "threads/synch.h"
+#include "threads/malloc.h"
+#include "userprog/process.h"
+
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
+
+static int sys_write (int fd, const void *buffer, unsigned size);
 
 /* System call.
  *
@@ -39,8 +45,56 @@ syscall_init (void) {
 
 /* The main system call interface */
 void
-syscall_handler (struct intr_frame *f UNUSED) {
+syscall_handler (struct intr_frame *f) {
 	// TODO: Your implementation goes here.
-	printf ("system call!\n");
-	thread_exit ();
+	uint64_t n = f->R.rax;
+	switch (n) {
+		case SYS_EXIT:
+			sys_exit ((int) f->R.rdi);
+			return;
+		case SYS_WRITE:
+			f->R.rax = sys_write ((int) f->R.rdi,
+								  (const void *) f->R.rsi,
+								  (unsigned) f->R.rdx);
+			break;
+		default:
+			/* 아직 안 쓰는 syscall은 전부 종료시킴 */
+			sys_exit (-1);
+	}
+}
+
+/* 
+	시스템콜 인자 전달은 레지스터로 이뤄짐.
+	- RAX: 시스템콜 번호, 반환값
+	- RDI: 1번째 인자
+	- RSI: 2번째 인자
+	- RDX: 3번째 인자
+	(다음은 필요시 R10, R8, R9)
+*/
+
+void
+sys_exit (int status) {
+	struct thread *cur = thread_current ();
+	printf ("%s: exit(%d)\n", thread_name (), status);
+
+	/* 부모에게 종료 전달 */
+	if (cur->wstatus) {
+		cur->wstatus->exit_status = status;
+		cur->wstatus->dead = true;
+		sema_up (&(cur->wstatus->sema));				// 부모 깨우기
+		if (--cur->wstatus->ref_cnt == 0) {				// 자식 몫 반납
+			free (cur->wstatus);
+		}
+		cur->wstatus = NULL;
+	}
+  	thread_exit ();		/* 반환 없음. 되돌아오지 않음. */
+}
+
+static int 
+sys_write (int fd, const void *buffer, unsigned size) {
+	if (fd == 1 && buffer && size) {	/* stdout만 지원 */
+		putbuf (buffer, size);
+		return (int) size;
+	}
+	return -1;
 }

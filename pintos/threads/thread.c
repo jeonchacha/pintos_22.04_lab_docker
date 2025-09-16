@@ -440,6 +440,13 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->base_priority = priority;
 	list_init(&(t->donations));
 	t->wait_on_lock = NULL;
+
+#ifdef USERPROG
+	/* 커널 스레드도 process_exit()를 타므로 항상 초기화 필요 */
+	t->parent = NULL;
+	list_init (&t->children);
+	t->wstatus = NULL;
+#endif
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should

@@ -9,6 +9,10 @@
 #include "vm/vm.h"
 #endif
 
+/* userprog에서만 쓰는 타입의 전방선언(정의는 userprog/process.h) */
+#ifdef USERPROG
+struct wait_status;
+#endif
 
 /* States in a thread's life cycle. */
 enum thread_status {
@@ -98,6 +102,11 @@ struct thread {
 #ifdef USERPROG
 	/* Owned by userprog/process.c. */
 	uint64_t *pml4;                     /* Page map level 4 */
+
+	/* userprog: 부모/자식 wait 관리 */
+	struct thread *parent;			/* 부모 스레드 (nullable) */
+	struct list children;			/* 자식들의 wait_status 리스트 */
+	struct wait_status *wstatus;	/* 부모와 공유하는 나 자신의 wait_status */
 #endif
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
