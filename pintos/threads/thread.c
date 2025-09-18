@@ -442,7 +442,8 @@ init_thread (struct thread *t, const char *name, int priority) {
 	t->wait_on_lock = NULL;
 
 #ifdef USERPROG
-	/* 커널 스레드도 process_exit()를 타므로 항상 초기화 필요 */
+	/* 커널 스레드도 process_exit()를 타므로 항상 초기화 필요
+	   모든 스레드에서 안전하게 사용 가능하도록 */
 	t->parent = NULL;
 	list_init (&t->children);
 	t->wstatus = NULL;

@@ -15,8 +15,8 @@ create-normal FAIL
 priority-donate-lower PASS
 bad-write PASS
 open-twice FAIL
-exec-missing FAIL
-exec-arg FAIL
+exec-missing PASS
+exec-arg PASS
 read-bad-ptr PASS
 dup2-complex FAIL
 create-long FAIL
@@ -51,8 +51,8 @@ lg-create FAIL
 exec-read FAIL
 read-boundary FAIL
 priority-sema PASS
-wait-twice FAIL
-exec-boundary FAIL
+wait-twice PASS
+exec-boundary PASS
 close-normal FAIL
 sm-create FAIL
 halt PASS
@@ -69,7 +69,7 @@ multi-oom FAIL
 fork-once FAIL
 priority-change PASS
 write-boundary FAIL
-wait-killed FAIL
+wait-killed PASS
 lg-full FAIL
 close-bad-fd PASS
 alarm-negative PASS
@@ -78,8 +78,8 @@ exit PASS
 write-bad-ptr PASS
 priority-donate-sema PASS
 lg-seq-block FAIL
-wait-simple FAIL
-exec-once FAIL
+wait-simple PASS
+exec-once PASS
 args-many PASS
 fork-read FAIL
 write-zero FAIL

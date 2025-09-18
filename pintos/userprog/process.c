@@ -35,11 +35,6 @@ process_init (void) {
 	struct thread *current = thread_current ();
 }
 
-/* Starts the first userland program, called "initd", loaded from FILE_NAME.
- * The new thread may be scheduled (and may even exit)
- * before process_create_initd() returns. Returns the initd's
- * thread id, or TID_ERROR if the thread cannot be created.
- * Notice that THIS SHOULD BE CALLED ONCE. */
 /* "initd"라는 첫 번째 사용자 프로그램이 FILE_NAME에서 로드되어 시작됩니다.
  *	새로운 스레드는 process_create_initd() 함수가 반환되기 전에 이미 스케줄링되거나 종료될 수도 있습니다. 
  *	이 함수는 initd의 스레드 ID를 반환하며, 스레드를 생성할 수 없는 경우 TID_ERROR를 반환합니다.
@@ -70,7 +65,7 @@ process_create_initd (const char *file_name) {
 								 * 자식이 sys_exit()에서 정리할 때 --ref_cnt
 								 * 0이 되면 free(w) (둘 다 손을 뗀 시점) */
 	w->dead = false;			/* 자식이 exit()를 호출하면 sys_exit()에서 true로 바꾸고 부모를 깨움. */
-	sema_init (&w->sema, 0);	/* 세마포어 초기값 0: 부모가 process_wait()에서 sema_down() 하면 즉시 블록됨.
+	sema_init (&(w->sema), 0);	/* 세마포어 초기값 0: 부모가 process_wait()에서 sema_down() 하면 즉시 블록됨.
 								 * 자식이 종료할 때 sys_exit()에서 sema_up(&w->sema) 호출 → 부모 대기 해제. */
 
 	/* initd에 넘길 aux(파일명 페이지, wstatus) */
@@ -86,8 +81,17 @@ process_create_initd (const char *file_name) {
 	aux->fname = fn_copy;
 	aux->w = w;
 
+	// 스레드 "표시 이름"만 첫 토큰으로 잘라서 준비
+    char tname[16];
+    size_t i = 0;
+    while (file_name[i] != '\0' && file_name[i] != ' ' && i < sizeof tname - 1) {
+        tname[i] = file_name[i];
+        i++;
+    }
+    tname[i] = '\0';
+
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, aux);
+	tid = thread_create (tname, PRI_DEFAULT, initd, aux);
 	if (tid == TID_ERROR) {
 		free(aux);
 		free(w);
@@ -101,7 +105,6 @@ process_create_initd (const char *file_name) {
 	return tid;
 }
 
-/* A thread function that launches first user process. */
 /* 사용자 프로세스를 처음으로 실행하는 스레드 함수. */
 static void
 initd (void *aux_) {
@@ -109,10 +112,7 @@ initd (void *aux_) {
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
 
-	// process_init ();
-
 	/* 자식 스레드 입장에서 내 wstatus 연결 */
-
 	// 1) 부모가 보낸 포인터를 우리가 아는 구조체로 캐스팅
 	struct {
 		char *fname;
@@ -129,8 +129,10 @@ initd (void *aux_) {
 	// 4) 빼둔 값 사용: 내 wstatus 연결
 	thread_current ()->wstatus = w;
 
-	if (process_exec (fname) < 0) // 5) exec 호출: 여기서 성공하면 더는 initd로 돌아오지 않음
-		PANIC("Fail to launch initd\n");
+	// 5) exec 호출: 여기서 성공하면 더는 initd로 돌아오지 않음
+	if (process_exec (fname) < 0) {
+		sys_exit(-1);
+	} 
 	NOT_REACHED ();
 }
 
@@ -224,7 +226,7 @@ error:
 /* Switch the current execution context to the f_name.
  * Returns -1 on fail. */
 int
-process_exec (void *f_name) {
+process_exec (void *f_name) {		// 새 프로세스 생성이 아니라 현제 프로세스의 메모리 이미지를 교체하는 동작.
 	char *file_name = f_name;
 	bool success;
 
@@ -251,17 +253,6 @@ process_exec (void *f_name) {
 	do_iret (&_if);
 	NOT_REACHED ();
 }
-
-
-/* Waits for thread TID to die and returns its exit status.  If
- * it was terminated by the kernel (i.e. killed due to an
- * exception), returns -1.  If TID is invalid or if it was not a
- * child of the calling process, or if process_wait() has already
- * been successfully called for the given TID, returns -1
- * immediately, without waiting.
- *
- * This function will be implemented in problem 2-2.  For now, it
- * does nothing. */
 
 /* 지정된 스레드(TID)가 종료될 때까지 기다렸다가 해당 스레드의 종료 상태를 반환합니다. 
  * 만약 스레드가 커널에 의해 (예: 예외로 인해) 종료되었다면 -1을 반환합니다. 
@@ -303,12 +294,9 @@ process_wait (tid_t child_tid) {
 void
 process_exit (void) {
 	struct thread *curr = thread_current ();
-	/* TODO: Your code goes here.
-	 * TODO: Implement process termination message (see
-	 * TODO: project2/process_termination.html).
-	 * TODO: We recommend you to implement process resource cleanup here. */
 
-	/* 내가 아직 wait하지 않은 자식들의 wstatus 정리 (부모 선종료 케이스) */
+	/* 내가 아직 wait하지 않은 자식들의 wstatus 정리 (부모 선종료 케이스)
+	   목적: 자식들의 wstatus 누수/댕글링 방지 */
 	struct list_elem *e, *next;
 	for (e = list_begin (&(curr->children)); e != list_end (&(curr->children)); e = next) {
 		next = list_next (e);
@@ -459,8 +447,6 @@ load (const char *file_name, struct intr_frame *if_) {
 	}
 
 	if (argc == 0) goto done;	// 토큰 0개 처리
-	/* 중요!! 토큰화 후 첫 토큰을 스레드 이름으로: 테스트 출력은 program: exit(N) 형태를 기대하므로. */
-	strlcpy (thread_current()->name, argv_tok[0], sizeof thread_current()->name); 
 
 	/* Open executable file. -> first token (program name) */
 	file = filesys_open (argv_tok[0]);		// 프로그램 파일 open
@@ -477,7 +463,7 @@ load (const char *file_name, struct intr_frame *if_) {
 			|| ehdr.e_version != 1
 			|| ehdr.e_phentsize != sizeof (struct Phdr)
 			|| ehdr.e_phnum > 1024) {
-		printf ("load: %s: error loading executable\n", file_name);
+		printf ("load: %s: error loading executable\n", argv_tok[0]);
 		goto done;
 	}
 
@@ -541,8 +527,6 @@ load (const char *file_name, struct intr_frame *if_) {
 	/* Start address. */
 	if_->rip = ehdr.e_entry;
 
-	/* TODO: Your code goes here.
-	 * TODO: Implement argument passing (see project2/argument_passing.html). */
 	uint64_t rsp = (uint64_t) USER_STACK;	// x86-64에서 포인터/레지스터는 64비트
 	const uint64_t UBASE = (uint64_t) USER_STACK - PGSIZE;	// 스택은 1페이지만 매핑, 유효범위 = [BASE, TOP)
 	uint64_t arg_addr[64];
@@ -583,7 +567,7 @@ load (const char *file_name, struct intr_frame *if_) {
 	if_->rsp   = (uint64_t) rsp;
 
 	success = true;
-
+	
 done:
 	/* We arrive here whether the load is successful or not. */
 	if (buf) palloc_free_page (buf);
@@ -591,7 +575,6 @@ done:
 	if (file) file_close (file);
 	return success;
 }
-
 
 /* Checks whether PHDR describes a valid, loadable segment in
  * FILE and returns true if so, false otherwise. */

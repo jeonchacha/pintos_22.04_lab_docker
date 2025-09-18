@@ -5,6 +5,18 @@
         "boundary.h": "c",
         "main.h": "c",
         "syscall-nr.h": "c",
-        "synch.h": "c"
+        "synch.h": "c",
+        "vaddr.h": "c",
+        "stdint.h": "c",
+        "thread.h": "c",
+        "stdio.h": "c",
+        "interrupt.h": "c",
+        "loader.h": "c",
+        "gdt.h": "c",
+        "flags.h": "c",
+        "intrinsic.h": "c",
+        "malloc.h": "c",
+        "process.h": "c",
+        "mmu.h": "c"
     }
 }

@@ -6,6 +6,7 @@
 #include "threads/thread.h"
 #include "intrinsic.h"
 #include "userprog/syscall.h"
+#include "threads/vaddr.h"   /* is_user_vaddr() */
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -82,13 +83,9 @@ kill (struct intr_frame *f) {
 	   exception originated. */
 	switch (f->cs) {
 		case SEL_UCSEG:
-			/* User's code segment, so it's a user exception, as we
-			   expected.  Kill the user process.  */
-			printf ("%s: dying due to interrupt %#04llx (%s).\n",
-					thread_name (), f->vec_no, intr_name (f->vec_no));
-			intr_dump_frame (f);
-			thread_exit ();
-
+			/* 유저 모드 예외는 -1로 종료: 부모에게 정상 통보 */
+			sys_exit (-1);
+    		NOT_REACHED ();
 		case SEL_KCSEG:
 			/* Kernel's code segment, which indicates a kernel bug.
 			   Kernel code shouldn't throw exceptions.  (Page faults
@@ -150,19 +147,6 @@ page_fault (struct intr_frame *f) {
 	/* Count page faults. */
 	page_fault_cnt++;
 
-	/* 사용자 모드에서 난 잘못된 접근은 조용히 -1 종료. 
-	(부모의 process_wait()가 제대로 깨어나도록) */
-	if (user) {
-		sys_exit (-1);
-	}
-
-	/* If the fault is true fault, show info and exit. */
-	// printf ("Page fault at %p: %s error %s page in %s context.\n",
-	// 		fault_addr,
-	// 		not_present ? "not present" : "rights violation",
-	// 		write ? "writing" : "reading",
-	// 		user ? "user" : "kernel");
-	
+	/* 유저면 조용히 kill() -> sys_exit(-1), 커널이면 PANIC */
 	kill (f);
 }
-
