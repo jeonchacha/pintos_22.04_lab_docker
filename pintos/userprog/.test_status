@@ -1,7 +1,7 @@
 exec-bad-ptr PASS
 sm-full FAIL
 rox-simple FAIL
-fork-multiple FAIL
+fork-multiple PASS
 args-dbl-space PASS
 read-bad-fd PASS
 priority-donate-multiple PASS
@@ -23,7 +23,7 @@ create-long FAIL
 priority-preempt PASS
 fork-close FAIL
 alarm-simultaneous PASS
-fork-boundary FAIL
+fork-boundary PASS
 priority-donate-chain PASS
 rox-multichild FAIL
 create-bound FAIL
@@ -61,12 +61,12 @@ sm-random FAIL
 alarm-zero PASS
 open-boundary FAIL
 create-null PASS
-fork-recursive FAIL
+fork-recursive PASS
 open-bad-ptr PASS
 write-normal FAIL
 bad-read PASS
 multi-oom FAIL
-fork-once FAIL
+fork-once PASS
 priority-change PASS
 write-boundary FAIL
 wait-killed PASS

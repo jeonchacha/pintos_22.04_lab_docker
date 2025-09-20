@@ -17,6 +17,8 @@
 #include "threads/mmu.h"	// pml4_get_page
 #include "threads/palloc.h" // palloc_get_page/palloc_free_page
 
+struct lock fs_lock;		// 전역 파일시스템 락 정의(단 한 곳)
+
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
@@ -53,6 +55,8 @@ syscall_init (void) {
 	 * mode stack. Therefore, we masked the FLAG_FL. */
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
+
+	lock_init(&fs_lock);
 }
 
 /* The main system call interface */
@@ -164,9 +168,14 @@ sys_wait (tid_t tid) {
 
 static tid_t
 sys_fork (const char *name, struct intr_frame *f) {
-	if (name == NULL) return TID_ERROR;
-	// 임시: 진짜 fork 대신, 요청 이름으로 바로 프로세스 생성해서 pid만 리턴.
-	return process_create_initd(name);
+	if (name == NULL)
+		sys_exit(-1);
+
+	char *kname = copy_in_string_alloc(name);
+	tid_t t = process_fork(kname, f);
+	palloc_free_page(kname); 
+
+	return t;
 }
 
 /* user -> kernel 임의 버퍼 복사 */

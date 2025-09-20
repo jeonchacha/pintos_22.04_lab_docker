@@ -17,6 +17,7 @@
         "intrinsic.h": "c",
         "malloc.h": "c",
         "process.h": "c",
-        "mmu.h": "c"
+        "mmu.h": "c",
+        "palloc.h": "c"
     }
 }

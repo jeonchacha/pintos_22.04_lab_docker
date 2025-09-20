@@ -29,6 +29,8 @@ static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
 
+extern struct lock fs_lock;
+
 /* General process initializer for initd and other process. */
 static void
 process_init (void) {
@@ -136,91 +138,164 @@ initd (void *aux_) {
 	NOT_REACHED ();
 }
 
-/* Clones the current process as `name`. Returns the new process's thread id, or
- * TID_ERROR if the thread cannot be created. */
+/* 현재 프로세스를 'name'이라는 이름의 새 스레드로 복제한다.
+ * 성공 시 자식의 tid를 반환, 실패 시 TID_ERROR 반환. 
+ * 부모는 자식 준비(복제 성공/실패)가 확정되기 전까지 반환하지 않는다. */
 tid_t
-process_fork (const char *name, struct intr_frame *if_ UNUSED) {
-	/* Clone current thread to new thread.*/
-	return thread_create (name,
-			PRI_DEFAULT, __do_fork, thread_current ());
+process_fork (const char *name, struct intr_frame *if_) {
+	struct thread *parent = thread_current();		/* 현재 실행 중인 스레드 포인터를 부모로 보관 */
+
+	/* wait_status 생성, 초기화 */
+	struct wait_status *w = malloc (sizeof (*w));
+	if (w == NULL) return TID_ERROR;
+
+	w->tid = TID_ERROR;								/* 아직 자식 tid를 모름(스레드 생성 전) */
+	w->exit_status = 0;								/* 기본값 0, 실제 값은 자식이 exit(status) 때 기록 */
+	w->ref_cnt = 2;									/* 부모 1 + 자식 1 이 참조 → 초기 2 */
+	w->dead = false;
+	sema_init (&(w->sema), 0);						/* 부모가 wait 할 세마포어(자식 종료 시 up) 초기 0 */
+
+	/* 자식 스레드 시작 루틴(__do_fork)에 건네줄 보조 패킷 할당 */
+	struct fork_aux *aux = malloc (sizeof (*aux));
+	if (aux == NULL) {
+		free(w);
+		return TID_ERROR;
+	}
+	aux->parent_if = *if_;							/* 부모의 intr_frame을 '값 복사' (부모 스택 사라져도 안전) */
+	aux->parent = parent;
+	aux->w = w;										/* wait_status 전달(자식이 자기 필드에 연결하고 사용) */
+	aux->success = false;							/* 자식이 성공 시 true로 바꿈 */
+	sema_init(&aux->done, 0);						/* 부모가 자식 준비 완료를 기다릴 세마포어(자식이 up) */
+
+	/* 새 스레드 생성: 자식은 __do_fork()에서 부모 복제를 수행 */
+	tid_t tid = thread_create (name, PRI_DEFAULT, __do_fork, aux);
+	if (tid == TID_ERROR) {
+		free(aux);
+		free(w);
+		return TID_ERROR;
+	}
+
+	/* 자식이 복제 작업을 마치고 성공/실패를 표시할 때까지 대기 */
+	sema_down(&(aux->done));						/* __do_fork()가 끝에서 sema_up() 해 줄 때까지 잠듦 */
+
+	/* 복제 실패 */
+	if (!aux->success) {
+		if (--w->ref_cnt == 0)
+			free(w);
+
+		free(aux);
+		return TID_ERROR;
+	}
+
+	/* 복제 성공: 부모의 children 목록에 wait_status를 연결 */
+	w->tid = tid;
+	list_push_back(&(parent->children), &(w->elem));
+
+	free(aux);
+	return tid;									/* 자식의 tid를 부모에게 반환 → fork 성공 */
 }
 
-#ifndef VM
-/* Duplicate the parent's address space by passing this function to the
- * pml4_for_each. This is only for the project 2. */
+/* vm에서 안씀 */
+#ifndef VM 
+/* 부모의 주소 공간을 복제하기 위해 이 함수를 pml4_for_each에 전달. */
 static bool
-duplicate_pte (uint64_t *pte, void *va, void *aux) {
+duplicate_pte (uint64_t *pte, void *va, void *aux) {		/* 부모의 PTE 하나를 자식 주소공간으로 복제하는 콜백 */
+	/* 현재 실행 중인 스레드 = 자식(복제 대상이 되는 쪽) */
 	struct thread *current = thread_current ();
+
+	/* pml4_for_each()에 aux로 실어 보낸 부모 스레드 포인터 복원 */
 	struct thread *parent = (struct thread *) aux;
-	void *parent_page;
-	void *newpage;
-	bool writable;
 
-	/* 1. TODO: If the parent_page is kernel page, then return immediately. */
+	/* 커널 영역 주소는 복제 대상 아님 → 그냥 건너뛰고 계속 진행 */
+	if (!is_user_vaddr(va)) return true;			
 
-	/* 2. Resolve VA from the parent's page map level 4. */
-	parent_page = pml4_get_page (parent->pml4, va);
+	/* 부모 pml4에서 가상주소 va가 매핑된 커널 가상주소(KVA)를 얻음 */
+	void *parent_page = pml4_get_page(parent->pml4, va);
+	/* 부모가 해당 va를 매핑하지 않았다면 복제할 게 없음 → 통과 */
+	if (parent_page == NULL) return true;
 
-	/* 3. TODO: Allocate new PAL_USER page for the child and set result to
-	 *    TODO: NEWPAGE. */
+	/* 자식 쪽에 올릴 새 사용자 페이지 할당 */
+	void *newpage = palloc_get_page(PAL_USER);
+	/* 메모리 부족 등으로 실패하면 전체 복제를 중단(콜백 실패 반환) */
+	if (newpage == NULL) return false;
 
-	/* 4. TODO: Duplicate parent's page to the new page and
-	 *    TODO: check whether parent's page is writable or not (set WRITABLE
-	 *    TODO: according to the result). */
-
-	/* 5. Add new page to child's page table at address VA with WRITABLE
-	 *    permission. */
-	if (!pml4_set_page (current->pml4, va, newpage, writable)) {
-		/* 6. TODO: if fail to insert page, do error handling. */
-	}
-	return true;
+	/* 부모 페이지의 내용을 그대로 자식 새 페이지로 바이트 단위 복사 */
+	memcpy(newpage, parent_page, PGSIZE);
+	/* 부모 PTE의 쓰기 가능 플래그를 읽어 동일한 접근권한을 유지 */
+	bool writable = is_writable(pte);
+	
+	/* 자식 pml4에 (va → newpage) 매핑을 동일 권한으로 설치 */
+	if (!pml4_set_page(current->pml4, va, newpage, writable)) {
+		palloc_free_page(newpage);							/* 매핑에 실패했으면 방금 할당한 물리 페이지 반납(누수 방지) */
+		return false;										/* 이 PTE 복제 실패를 상위로 알림(전체 fork 실패로 이어짐) */
+  	}
+	return true;											/* 이 PTE 복제를 성공적으로 마쳤음을 알림(다음 엔트리로 진행) */
 }
 #endif
 
-/* A thread function that copies parent's execution context.
- * Hint) parent->tf does not hold the userland context of the process.
- *       That is, you are required to pass second argument of process_fork to
- *       this function. */
+/* 부모의 execution context을 복사하는 스레드 함수.
+ * thread 구조체의 tf는 커널 컨텍스트라서 사용자 레지스터 값이 아님.
+ * 그래서 process_fork()에서 전달한 parent_if를 사용해야 함. */
 static void
-__do_fork (void *aux) {
-	struct intr_frame if_;
-	struct thread *parent = (struct thread *) aux;
-	struct thread *current = thread_current ();
-	/* TODO: somehow pass the parent_if. (i.e. process_fork()'s if_) */
-	struct intr_frame *parent_if;
-	bool succ = true;
+__do_fork (void *aux_) {							/* 자식 스레드 본체: thread_create가 이 함수를 실행 */
+	struct fork_aux *aux = aux_;					/* 부모가 넘겨준 보조 패킷을 원래 타입으로 캐스팅 */
+	struct thread *parent = aux->parent;			/* 보조 패킷에 들어있는 부모 스레드 포인터 획득 */
+	struct thread *current = thread_current ();		/* 현재 실행 중(자식) 스레드 포인터 */
 
-	/* 1. Read the cpu context to local stack. */
-	memcpy (&if_, parent_if, sizeof (struct intr_frame));
+	struct intr_frame if_ = aux->parent_if;			/* 1. 부모의 사용자 레지스터 컨텍스트를 로컬에 복사. */	
+	bool ok = true;									/* 진행 중 오류가 있었는지 표시하는 플래그 */
+	
+	/* 페이지 테이블 복제(자식의 주소 공간 만들기) */
+	current->pml4 = pml4_create();					/* 2. 자식용 최상위 페이지 테이블(PML4) 새로 생성 */
+	if (current->pml4 == NULL) {
+		ok = false;
+		goto out;
+	}
+	process_activate (current);						/* 새 pml4 활성화 */
 
-	/* 2. Duplicate PT */
-	current->pml4 = pml4_create();
-	if (current->pml4 == NULL)
-		goto error;
-
-	process_activate (current);
 #ifdef VM
 	supplemental_page_table_init (&current->spt);
-	if (!supplemental_page_table_copy (&current->spt, &parent->spt))
-		goto error;
+	if (!supplemental_page_table_copy (&current->spt, &parent->spt)) {
+		ok = false;
+		goto out;
+	}
 #else
-	if (!pml4_for_each (parent->pml4, duplicate_pte, parent))
-		goto error;
+	/* (no-VM 버전) 부모의 모든 PTE를 순회하며 복제 */
+	if (!pml4_for_each (parent->pml4, duplicate_pte, parent)) { 
+		ok = false;
+		goto out;
+	}
 #endif
 
-	/* TODO: Your code goes here.
-	 * TODO: Hint) To duplicate the file object, use `file_duplicate`
-	 * TODO:       in include/filesys/file.h. Note that parent should not return
-	 * TODO:       from the fork() until this function successfully duplicates
-	 * TODO:       the resources of parent.*/
+	/* 파일 디스크립터 복제 */
+	for (int fd = 2; fd < FD_MAX; fd++) {			/* 표준입출력 0/1은 이미 세팅되어 있다고 가정, 2부터 복제 */
+		struct file *pf = parent->fd_table[fd];		/* 부모의 fd 엔트리(열린 파일 객체 포인터) 획득 */
+		if (pf != NULL) {							/* 실제로 열려 있는 슬롯만 처리 */
+			lock_acquire(&fs_lock);					/* 파일 시스템 계층은 스레드 안전하지 않으므로 전역 락 획득 */
+      		struct file *cf = file_duplicate(pf);	/* 부모 파일 객체를 안전하게 복제 */
+      		lock_release(&fs_lock);					/* 크리티컬 섹션 종료 후 락 해제 */
 
-	process_init ();
+			if (cf == NULL) {
+				ok = false;
+				goto out; 
+			}
 
-	/* Finally, switch to the newly created process. */
-	if (succ)
-		do_iret (&if_);
-error:
-	thread_exit ();
+			current->fd_table[fd] = cf;				/* 자식의 동일 fd 인덱스에 복제된 파일 객체 저장 */
+		}
+	}
+	current->fd_next = parent->fd_next;				/* 다음 할당할 fd 인덱스도 동일하게 복사 */
+
+	current->wstatus = aux->w;						/* 자식 스레드에 wait_status 연결(부모와 공유) */
+	if_.R.rax = 0 ; 								/* 자식의 fork() 반환값 = 0 */
+
+out:												/* 공통 정리 지점 */
+	aux->success = ok;
+	sema_up(&(aux->done));							/* 부모를 깨움: process_fork()의 sema_down()을 풀어줌 */
+
+	if (!ok) thread_exit ();						/* 실패 시 자식 스레드 종료 */
+
+	do_iret (&if_);									/* 유저 모드로 진입: 부모가 fork를 호출한 지점으로 복귀하되 RAX=0으로 실행 시작 */
+	NOT_REACHED();									/* 여기는 도달할 수 없음(이미 유저모드로 넘어감) */		
 }
 
 /* Switch the current execution context to the f_name.
