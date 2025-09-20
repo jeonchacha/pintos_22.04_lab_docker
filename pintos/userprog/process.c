@@ -23,13 +23,14 @@
 #endif
 #include "threads/malloc.h"
 #include "threads/synch.h"
+#include "userprog/syscall.h"
+
+extern struct lock fs_lock;         /* filesys.c의 전역 락을 사용(하나만 써야 함) */
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
-
-extern struct lock fs_lock;
 
 /* General process initializer for initd and other process. */
 static void
@@ -368,12 +369,12 @@ process_wait (tid_t child_tid) {
 /* Exit the process. This function is called by thread_exit (). */
 void
 process_exit (void) {
-	struct thread *curr = thread_current ();
+	struct thread *t = thread_current ();
 
 	/* 내가 아직 wait하지 않은 자식들의 wstatus 정리 (부모 선종료 케이스)
 	   목적: 자식들의 wstatus 누수/댕글링 방지 */
 	struct list_elem *e, *next;
-	for (e = list_begin (&(curr->children)); e != list_end (&(curr->children)); e = next) {
+	for (e = list_begin (&(t->children)); e != list_end (&(t->children)); e = next) {
 		next = list_next (e);
 		struct wait_status *w = list_entry (e, struct wait_status, elem);
 		list_remove (&(w->elem)); // 자식 목록에서 참조만 끊음. 자식 스레드는 그대로 잘 돌아감.
@@ -381,6 +382,12 @@ process_exit (void) {
 			free (w);
 		}
 	}
+
+	/* 열린 FD 전부 닫기 (stdin=0, stdout=1 제외) */
+    for (int fd = 2; fd < FD_MAX; fd++) {
+        fd_close(fd);
+    }
+
 	process_cleanup ();
 }
 
@@ -392,6 +399,14 @@ process_cleanup (void) {
 #ifdef VM
 	supplemental_page_table_kill (&curr->spt);
 #endif
+
+	/* 실행파일 핸들 정리: allow_write 자동 포함됨 */
+    if (curr->running_exe) {
+        lock_acquire(&fs_lock);
+        file_close(curr->running_exe);   // 내부에서 file_allow_write() 호출됨
+        lock_release(&fs_lock);
+        curr->running_exe = NULL;
+    }
 
 	uint64_t *pml4;
 	/* Destroy the current process's page directory and switch back
@@ -494,11 +509,11 @@ load (const char *file_name, struct intr_frame *if_) {
 	bool success = false;
 	int i;
 
-	/* Allocate and activate page directory. */
-	t->pml4 = pml4_create ();				// 페이지 디렉토리 생성. page map level 4
+	/* 새 pml4 생성 및 활성화 */
+	t->pml4 = pml4_create ();
 	if (t->pml4 == NULL)
 		goto done;
-	process_activate (thread_current ());	// 페이지 테이블 활성화
+	process_activate (t);
 
 	/* 
 		Pintos의 페이지 할당기에서 한 페이지(4KiB) 를 빌려오는 함수
@@ -507,7 +522,7 @@ load (const char *file_name, struct intr_frame *if_) {
 			PAL_USER -> user 풀에서 가져옴(스택 페이지처럼 사용자 매핑에 쓸 때)
 			0이면 커널 풀에서, 제로 초기화 없이 한 페이지를 가져옴.
 	*/
-	char *buf = palloc_get_page (0);
+	char *buf = palloc_get_page (0);			/* 커맨드 라인 보관 버퍼 */
 	if (buf == NULL) goto done;
 	strlcpy (buf, file_name, PGSIZE);
 
@@ -516,21 +531,27 @@ load (const char *file_name, struct intr_frame *if_) {
 	int argc = 0;
 	char *save_ptr = NULL;
 	for (char *t = strtok_r (buf, " ", &save_ptr);
-		 t && argc < 64; t = strtok_r (NULL, " ", &save_ptr)) 
-	{
+		 t && argc < 64; t = strtok_r (NULL, " ", &save_ptr)) {
 		argv_tok[argc++] = t;
 	}
 
 	if (argc == 0) goto done;	// 토큰 0개 처리
 
-	/* Open executable file. -> first token (program name) */
-	file = filesys_open (argv_tok[0]);		// 프로그램 파일 open
+	/* 실행 파일 오픈 + 쓰기 금지 설정 + 실행 파일 핸들 저장 */
+	lock_acquire (&fs_lock);
+	file = filesys_open (argv_tok[0]);
+
 	if (file == NULL) {
+		lock_release (&fs_lock);
 		printf ("load: %s: open failed\n", argv_tok[0]);
 		goto done;
 	}
 
-	/* Read and verify executable header. */
+	file_deny_write (file);			/* 실행 중인 파일에 대한 쓰기 금지 */
+	t->running_exe = file;          /* 현재 스레드에 실행 파일 핸들을 보관 */
+    lock_release (&fs_lock);                                
+
+	/* ELF 헤더 검증 */
 	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
 			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
 			|| ehdr.e_type != 2
@@ -595,7 +616,7 @@ load (const char *file_name, struct intr_frame *if_) {
 		}
 	}
 
-	/* Set up stack. */
+	/* 유저 스택 생성 */
 	if (!setup_stack (if_))
 		goto done;
 
@@ -644,10 +665,16 @@ load (const char *file_name, struct intr_frame *if_) {
 	success = true;
 	
 done:
-	/* We arrive here whether the load is successful or not. */
 	if (buf) palloc_free_page (buf);
 
-	if (file) file_close (file);
+	/* 중요: 성공이면 실행 파일 핸들은 t->running_exe가 보유 → 여기서 닫지 않음.
+	 * 실패면 곧바로 닫아서 deny_write 해제. */
+	if (file && !success) {
+		lock_acquire (&fs_lock);
+      	file_close (file);
+      	lock_release (&fs_lock);
+   }
+
 	return success;
 }
 

@@ -3,7 +3,7 @@
 #include <stddef.h>
 #include <random.h>
 #include <stdio.h>
-#include <string.h>
+#include <string.h>			/* memset */
 #include "threads/flags.h"
 #include "threads/interrupt.h"
 #include "threads/intr-stubs.h"
@@ -439,21 +439,23 @@ init_thread (struct thread *t, const char *name, int priority) {
 
 	t->base_priority = priority;
 	list_init(&(t->donations));
-	t->wait_on_lock = NULL;
+	t->wait_on_lock = NULL;			// 중복
 	
 #ifdef USERPROG
 	/* 커널 스레드도 process_exit()를 타므로 항상 초기화 필요
 	   모든 스레드에서 안전하게 사용 가능하도록 */
-	t->parent = NULL;
-	list_init (&t->children);
-	t->wstatus = NULL;
+	t->parent = NULL;				// 중복
+	list_init (&t->children);		// 반드시 필요
+	t->wstatus = NULL;				// 중복
 
 	/* FD 테이블 기본값 */
 	t->fd_next = 2;		/* 0=stdin, 1=stdout 예약 */
-	for (int i = 0; i < FD_MAX; i++) {
-		t->fd_table[i] = NULL;
-	}
-	t->running_exe = NULL;
+
+	/* 이미 memset(t, 0, sizeof *t); 를 호출하니까, 그 시점 이후에 fd_table은 어차피 0(NULL)로 초기화돼 있음.
+	 * 나머지 멤버도 마찬가지.
+	 */
+	memset(t->fd_table, 0, sizeof t->fd_table); // 중복
+	t->running_exe = NULL;						// 중복
 #endif
 }
 

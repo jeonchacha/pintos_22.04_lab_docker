@@ -18,6 +18,9 @@
         "malloc.h": "c",
         "process.h": "c",
         "mmu.h": "c",
-        "palloc.h": "c"
+        "palloc.h": "c",
+        "filesys.h": "c",
+        "init.h": "c",
+        "string.h": "c"
     }
 }

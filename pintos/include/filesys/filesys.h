@@ -3,6 +3,9 @@
 
 #include <stdbool.h>
 #include "filesys/off_t.h"
+#include "threads/synch.h"
+
+extern struct lock fs_lock;   /* 다른 모듈은 이 선언을 통해 같은 락을 참조 */
 
 /* Sectors of system file inodes. */
 #define FREE_MAP_SECTOR 0       /* Free map file inode sector. */

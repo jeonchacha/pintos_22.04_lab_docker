@@ -8,28 +8,44 @@
 #include "threads/flags.h"
 #include "intrinsic.h"
 
-#include "threads/synch.h"
+#include "threads/synch.h"		// sema_*, lock_*
 #include "threads/malloc.h"
 #include "userprog/process.h"
 
-#include <string.h>			// memcpy
-#include "threads/vaddr.h"	// is_user_vaddr, pg_ofs, PGSIZE
-#include "threads/mmu.h"	// pml4_get_page
-#include "threads/palloc.h" // palloc_get_page/palloc_free_page
+#include <string.h>				// memcpy
+#include "threads/vaddr.h"		// is_user_vaddr, pg_ofs, PGSIZE
+#include "threads/mmu.h"		// pml4_get_page
+#include "threads/palloc.h" 	// palloc_get_page/palloc_free_page
 
-struct lock fs_lock;		// 전역 파일시스템 락 정의(단 한 곳)
+#include "threads/init.h"   	// power_off() 선언
+
+#include "filesys/file.h"       // file_close/read/write/seek/tell/length, file_reopen/duplicate
+#include "filesys/filesys.h"	// fs_lock, filesys_*
+
+extern struct lock fs_lock;         /* filesys.c의 전역 락을 사용(하나만 써야 함) */
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
 
-static int sys_write (int fd, const void *buffer, unsigned size);
+static void sys_halt (void);
+static tid_t sys_fork (const char *name, struct intr_frame *f);
 static tid_t sys_exec (const char *cmd_line);
 static int sys_wait (tid_t tid);
-static tid_t sys_fork (const char *name, struct intr_frame *f);
 
+static bool sys_create (const char *file, unsigned initial_size);
+static bool sys_remove (const char *file);
+static int sys_open (const char *file);
+static int sys_write (int fd, const void *buffer, unsigned size);
+static void sys_close (int fd);
+
+/* user memory access */
 static void copy_in (void *kdst, const void *usrc, size_t n);
 static void copy_out (void *udst, const void *ksrc, size_t n);
 static char *copy_in_string_alloc (const char *us);
+
+/* fd helper */
+static int fd_install(struct file *f);
+static struct file *fd_get(int fd);
 
 /* System call.
  *
@@ -56,40 +72,6 @@ syscall_init (void) {
 	write_msr(MSR_SYSCALL_MASK,
 			FLAG_IF | FLAG_TF | FLAG_DF | FLAG_IOPL | FLAG_AC | FLAG_NT);
 
-	lock_init(&fs_lock);
-}
-
-/* The main system call interface */
-void
-syscall_handler (struct intr_frame *f) {
-	// TODO: Your implementation goes here.
-	uint64_t n = f->R.rax;
-
-	// printf("[syscall] rax=%lld (EXIT=%d, EXEC=%d, WAIT=%d, WRITE=%d)\n", 
-	// 	(long long)n, SYS_EXIT, SYS_EXEC, SYS_WAIT, SYS_WRITE);
-
-	switch (n) {
-		case SYS_EXIT:
-			sys_exit ((int) f->R.rdi);
-			return;
-		case SYS_WRITE:
-			f->R.rax = sys_write ((int) f->R.rdi,
-								  (const void *) f->R.rsi,
-								  (unsigned) f->R.rdx);
-			break;
-		case SYS_FORK:
-			f->R.rax = sys_fork ((const char *) f->R.rdi, f);
-			break;
-		case SYS_EXEC:
-			f->R.rax = sys_exec ((const char *) f->R.rdi);
-			break;
-		case SYS_WAIT:
-			f->R.rax = sys_wait ((tid_t) f->R.rdi);
-			break;
-		default:
-			/* 아직 안 쓰는 syscall은 전부 종료시킴 */
-			sys_exit (-1);
-	}
 }
 
 /* 
@@ -100,6 +82,63 @@ syscall_handler (struct intr_frame *f) {
 	- RDX: 3번째 인자
 	(다음은 필요시 R10, R8, R9)
 */
+void
+syscall_handler (struct intr_frame *f) {
+	uint64_t n = f->R.rax;
+
+	switch (n) {
+		case SYS_HALT:
+			sys_halt ();
+			NOT_REACHED ();
+		case SYS_EXIT:
+			sys_exit ((int) f->R.rdi);
+			return;
+		case SYS_FORK:
+			f->R.rax = sys_fork ((const char *) f->R.rdi, f);
+			break;
+		case SYS_EXEC:
+			f->R.rax = sys_exec ((const char *) f->R.rdi);
+			break;
+		case SYS_WAIT:
+			f->R.rax = sys_wait ((tid_t) f->R.rdi);
+			break;
+		case SYS_CREATE:
+			f->R.rax = sys_create ((const char *) f->R.rdi, 
+								   (unsigned) f->R.rsi);
+			break;
+		case SYS_REMOVE:
+			f->R.rax = sys_remove ((const char *) f->R.rdi);
+			break;
+		case SYS_OPEN:
+			f->R.rax = sys_open ((const char *) f->R.rdi); 
+			break;
+		// case SYS_FILESIZE:
+		// 	break;
+		// case SYS_READ:
+		// 	break;
+		case SYS_WRITE:
+			f->R.rax = sys_write ((int) f->R.rdi,
+								  (const void *) f->R.rsi,
+								  (unsigned) f->R.rdx);
+			break;
+		// case SYS_SEEK:
+		// 	break;
+		// case SYS_TELL:
+		// 	break;
+		case SYS_CLOSE:
+			sys_close ((int) f->R.rdi);
+			break;
+		default:
+			/* 아직 안 쓰는 syscall은 전부 종료시킴 */
+			sys_exit (-1);
+	}
+}
+
+static void 
+sys_halt (void) {
+	power_off();   	/* 절대 돌아오지 않음 */
+	NOT_REACHED ();
+}
 
 void
 sys_exit (int status) {
@@ -117,6 +156,113 @@ sys_exit (int status) {
 		cur->wstatus = NULL;
 	}
   	thread_exit ();		/* 반환 없음. 되돌아오지 않음. */
+}
+
+static tid_t
+sys_fork (const char *name, struct intr_frame *f) {
+	if (name == NULL)
+		sys_exit(-1);
+
+	char *kname = copy_in_string_alloc(name);
+	tid_t t = process_fork(kname, f);
+	palloc_free_page(kname); 
+
+	return t;
+}
+
+static tid_t
+sys_exec (const char *cmd_line) {
+	if (cmd_line == NULL) sys_exit(-1);
+
+	char *kcmd = copy_in_string_alloc(cmd_line);	// 유저 문자열을 커널 페이지에 안전 복사(+검증)
+													// 실패 시 여기서 sys_exit(-1)로 이미 종료됨
+
+	/* process_exec()은 성공 시 do_iret()로 유저모드 진입하고
+	 * '절대 돌아오지 않음', 실패 시 -1 반환. 또한 내부에서 palloc_free_page(file_name)로
+	 * kcmd를 '반드시 해제'하므로 여기서는 free를 하면 안됨(소유권 전달). */
+	if (process_exec ((void *) kcmd) < 0) {			// 성공 땐 이 함수로 절대 안돌아옴, 실패 시 -1 반환.
+        sys_exit(-1);
+    }
+    NOT_REACHED ();
+}
+
+/* wait: 커널 구현으로 위임 */
+static int
+sys_wait (tid_t tid) {
+	return process_wait (tid);
+}
+
+/* 파일 생성 시스템콜
+ * 성공 시 true(=1), 실패 시 false(=0) 반환.
+ * 파일명 포인터가 잘못되면 프로세스 종료(sys_exit(-1)). */
+static bool
+sys_create (const char *file, unsigned initial_size) {
+	if (file == NULL) sys_exit(-1);
+
+	/* 유저 문자열을 커널 한 페이지에 "안전하게" 복사.
+   	 * - 포인터 유효성 검증(매핑/유저영역) 포함
+     * - 너무 길면(-NUL 발견 못함) 내부에서 sys_exit(-1)
+     * 반환된 kname은 palloc_get_page(0)로 할당된 "커널" 페이지 */
+	char *kname = copy_in_string_alloc (file);
+	
+	if (kname[0] == '\0') {				/* 빈 문자열은 실패 취급 */
+		palloc_free_page (kname);
+		return false;
+	}
+
+	lock_acquire(&fs_lock);
+	bool ok = filesys_create(kname, (off_t) initial_size);	/* 실제 생성 요청 */
+	lock_release(&fs_lock);
+
+	palloc_free_page (kname);			/* 임시 문자열 버퍼 반납 */
+
+	return ok;
+}
+
+static bool
+sys_remove (const char *file) {
+	if (file == NULL) sys_exit (-1);
+
+	char *kname = copy_in_string_alloc (file);
+	
+	if (kname[0] == '\0') {
+		palloc_free_page (kname);
+		return false;
+	}
+
+	lock_acquire(&fs_lock);
+	bool ok = filesys_remove (kname);
+	lock_release(&fs_lock);
+
+	palloc_free_page (kname);
+
+	return ok;
+}
+
+static
+int sys_open (const char *file) {
+	if (file == NULL) sys_exit (-1);
+
+	char *kname = copy_in_string_alloc (file);		/* 유저 문자열을 안전하게 커널 1페이지에 복사(널 포함) */
+                                                    /* - 실패 시 내부에서 sys_exit(-1) 호출하므로 여기선 NULL 걱정 X */
+
+	lock_acquire (&fs_lock);
+	struct file *f = filesys_open (kname);
+	lock_release (&fs_lock);
+
+	palloc_free_page (kname);
+
+	if (f == NULL) return -1;						/* 파일이 존재하지 않거나 열기에 실패하면 -1 반환 */
+
+	int fd = fd_install(f);							/* 현재 스레드의 fd 테이블에 파일 객체를 설치하고 새 fd 할당 */
+	if (fd < 0) {									/* 테이블 가득 참 등으로 설치 실패하면 */
+		lock_acquire (&fs_lock);
+		file_close (f);								/* 참조를 해제하고 실제 파일도 닫아 리소스 누수 방지 */
+		lock_release (&fs_lock);
+		return -1;
+	}
+
+	return fd;										/* 성공적으로 설치했으니 새 파일 디스크립터 반환 */
 }
 
 static int 
@@ -144,39 +290,12 @@ sys_write (int fd, const void *buffer, unsigned size) {
 	return (int)wrote;									// 출력한 바이트 수 반환(성공)
 }
 
-static tid_t
-sys_exec (const char *cmd_line) {
-	if (cmd_line == NULL) sys_exit(-1);
-
-	char *kcmd = copy_in_string_alloc(cmd_line);	// 유저 문자열을 커널 페이지에 안전 복사(+검증)
-													// 실패 시 여기서 sys_exit(-1)로 이미 종료됨
-
-	/* process_exec()은 성공 시 do_iret()로 유저모드 진입하고
-	 * '절대 돌아오지 않음', 실패 시 -1 반환. 또한 내부에서 palloc_free_page(file_name)로
-	 * kcmd를 '반드시 해제'하므로 여기서는 free를 하면 안됨(소유권 전달). */
-	if (process_exec ((void *) kcmd) < 0) {			// 성공 땐 이 함수로 절대 안돌아옴, 실패 시 -1 반환.
-        sys_exit(-1);
-    }
-    NOT_REACHED ();
+static
+void sys_close (int fd) {
+	fd_close (fd);
 }
 
-/* wait: 커널 구현으로 위임 */
-static int
-sys_wait (tid_t tid) {
-	return process_wait (tid);
-}
-
-static tid_t
-sys_fork (const char *name, struct intr_frame *f) {
-	if (name == NULL)
-		sys_exit(-1);
-
-	char *kname = copy_in_string_alloc(name);
-	tid_t t = process_fork(kname, f);
-	palloc_free_page(kname); 
-
-	return t;
-}
+/* 유저 포인터 검증 및 안전복사 */
 
 /* user -> kernel 임의 버퍼 복사 */
 static void 
@@ -274,4 +393,53 @@ copy_in_string_alloc (const char *us) {
 	palloc_free_page(kpage);
 	sys_exit(-1);
 	return NULL; /* 도달 안 함 */
+}
+
+/* fd helpers */
+
+/* fd 설치: 현재 스레드의 fd_table에서 빈 슬롯을 찾아 파일 객체를 꽂고 fd를 돌려줌. */
+static int 
+fd_install(struct file *f) {
+	struct thread *t = thread_current();
+
+	for (int fd = t->fd_next; fd < FD_MAX; fd++) {
+		if (t->fd_table[fd] == NULL) {
+			t->fd_table[fd] = f;
+			t->fd_next = fd + 1;
+			return fd;
+		}
+	}
+	/* 앞쪽 빈자리도 탐색(누수 방지) */
+	for (int fd = 2; fd < t->fd_next; fd++) {
+		if (t->fd_table[fd] == NULL) {
+			t->fd_table[fd] = f; 
+			return fd;
+		}
+	}
+	
+	return -1; /* fd 부족 */
+}
+
+static struct file *
+fd_get(int fd) {
+	if (fd < 2 || fd >= FD_MAX) 
+		return NULL;
+	return thread_current()->fd_table[fd];
+}
+
+/* fd 닫기: 테이블에서 빼고 실제 파일 객체를 닫음(반드시 fs_lock으로 보호) */
+void 
+fd_close(int fd) {
+	struct thread *t = thread_current();
+
+	if (fd >= 2 && fd < FD_MAX && t->fd_table[fd]) {
+		lock_acquire(&fs_lock);
+    	file_close(t->fd_table[fd]);	/* 참조 끊기 & 실제 파일 닫기 */
+    	lock_release(&fs_lock);
+    	t->fd_table[fd] = NULL;			/* 테이블 슬롯 비우기 */
+    	if (fd < t->fd_next) { 
+			t->fd_next = fd; /* 앞자리 재사용 */
+		}
+	}
+
 }

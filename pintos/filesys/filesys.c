@@ -8,10 +8,14 @@
 #include "filesys/directory.h"
 #include "devices/disk.h"
 
+#include "threads/synch.h"
+
 /* The disk that contains the file system. */
 struct disk *filesys_disk;
 
 static void do_format (void);
+
+struct lock fs_lock;		// 전역 파일시스템 락 정의(단 한 곳)
 
 /* Initializes the file system module.
  * If FORMAT is true, reformats the file system. */
@@ -39,6 +43,8 @@ filesys_init (bool format) {
 
 	free_map_open ();
 #endif
+
+	lock_init(&fs_lock);
 }
 
 /* Shuts down the file system module, writing any unwritten data
