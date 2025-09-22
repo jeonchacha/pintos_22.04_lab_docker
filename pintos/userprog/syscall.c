@@ -21,6 +21,7 @@
 
 #include "filesys/file.h"       // file_close/read/write/seek/tell/length, file_reopen/duplicate
 #include "filesys/filesys.h"	// fs_lock, filesys_*
+#include "devices/input.h"		// input_getc() 
 
 extern struct lock fs_lock;         /* filesys.c의 전역 락을 사용(하나만 써야 함) */
 
@@ -35,7 +36,11 @@ static int sys_wait (tid_t tid);
 static bool sys_create (const char *file, unsigned initial_size);
 static bool sys_remove (const char *file);
 static int sys_open (const char *file);
+static int sys_filesize (int fd);
+static int sys_read (int fd, void *buffer, unsigned size);
 static int sys_write (int fd, const void *buffer, unsigned size);
+static void sys_seek (int fd, unsigned position);
+static unsigned sys_tell (int fd);
 static void sys_close (int fd);
 
 /* user memory access */
@@ -112,24 +117,30 @@ syscall_handler (struct intr_frame *f) {
 		case SYS_OPEN:
 			f->R.rax = sys_open ((const char *) f->R.rdi); 
 			break;
-		// case SYS_FILESIZE:
-		// 	break;
-		// case SYS_READ:
-		// 	break;
+		case SYS_FILESIZE:
+			f->R.rax = sys_filesize ((int) f->R.rdi);
+			break;
+		case SYS_READ:
+			f->R.rax = sys_read ((int) f->R.rdi,
+								 (void *) f->R.rsi,
+								 (unsigned) f->R.rdx);
+			break;
 		case SYS_WRITE:
 			f->R.rax = sys_write ((int) f->R.rdi,
 								  (const void *) f->R.rsi,
 								  (unsigned) f->R.rdx);
 			break;
-		// case SYS_SEEK:
-		// 	break;
-		// case SYS_TELL:
-		// 	break;
+		case SYS_SEEK:
+			sys_seek ((int) f->R.rdi,
+					  (unsigned) f->R.rsi);
+			break;
+		case SYS_TELL:
+			f->R.rax = sys_tell ((int) f->R.rdi);
+			break;
 		case SYS_CLOSE:
 			sys_close ((int) f->R.rdi);
 			break;
 		default:
-			/* 아직 안 쓰는 syscall은 전부 종료시킴 */
 			sys_exit (-1);
 	}
 }
@@ -265,29 +276,165 @@ int sys_open (const char *file) {
 	return fd;										/* 성공적으로 설치했으니 새 파일 디스크립터 반환 */
 }
 
+/* 파일 크기 반환: 실패 시 -1 */
+static int 
+sys_filesize (int fd) {
+	/* 유효한 파일 FD를 얻는다(0,1 제외, 닫혔거나 범위 밖이면 NULL */
+	struct file *f = fd_get (fd);
+	if (f == NULL) return -1;
+
+	lock_acquire(&fs_lock);
+	int len = (int) file_length (f); 	/* 파일 길이(바이트) */
+	lock_release(&fs_lock);
+
+	return len;
+}
+
+/* 파일,콘솔 읽기 */
+static int
+sys_read (int fd, void *buffer, unsigned size) {
+	if (size == 0) return 0;
+	if (fd == 1) return -1;								/* stdout(1)은 읽기 불가 */
+	
+	/* stdin(0) 처리: 콘솔에서 size 바이트를 받아 유저 버퍼에 기록 */
+	if (fd == 0) {										
+		unsigned got = 0;								/* 지금까지 기록한 바이트 수 */
+		while (got < size) {								
+			char c = (char) input_getc();				/* 콘솔에서 1바이트 읽기 (blocking) */
+			copy_out((uint8_t *)buffer + got, &c, 1);	/* 유저 주소 = 시작 + 누적 */
+			got++;										
+		}
+		return (int) got;
+	}
+
+	/* 파일 FD */
+	struct file *f = fd_get (fd);
+	if (f == NULL) return -1;
+
+	unsigned left = size; 								/* 남은 바이트 */
+	unsigned got = 0;									/* 누적 읽은 바이트 */
+
+	char *kpage = palloc_get_page(0);					/* 커널 임시 버퍼(1페이지) */
+	if (!kpage) sys_exit (-1);
+
+	while (left > 0) {
+		size_t chunk = left > PGSIZE ? PGSIZE : left;	/* 이번에 읽을 크기(최대 1페이지) */
+
+		lock_acquire(&fs_lock);							/* filesys 임계구역 진입 */
+		int n = file_read(f, kpage, chunk);				/* 파일에서 읽기 */
+		lock_release(&fs_lock);							/* 임계구역 해제 */
+
+		if (n < 0) {									/* 오류 */
+			palloc_free_page(kpage);
+			return -1;
+		}
+
+		if (n == 0)										/* EOF */
+			break;
+
+		/* 커널 버퍼 -> 유저 버퍼로 안전 복사(페이지 경계/매핑 검증 포함) */
+		copy_out((uint8_t *) buffer + got, kpage, (size_t)n);	
+
+		got += (unsigned) n;							/* 누적 증가 */
+		left -= (unsigned) n;							/* 남은 감소 */
+
+		if ((unsigned)n < chunk)						/* 이번 페이지만큼 못 채웠으면 EOF -> 종료 */
+			break;
+	}
+
+	palloc_free_page(kpage);
+	return (int)got;									/* 실제 읽은 바이트 수 */
+}
+
+/* 파일, 콘솔 쓰기: 성공 시 바이트 수, 실패 시 -1 */
 static int 
 sys_write (int fd, const void *buffer, unsigned size) {
-	if (fd != 1) return -1;								/* stdout만 지원 */
+	if (size == 0) return 0;
+	if (fd == 0) return -1;                           	/* stdin(0)에 쓰기는 불가 */
 
-  	unsigned left = size;								// 남은 바이트
-	unsigned wrote = 0;									// 누적 출력 바이트
-  	
-	char *kbuf = palloc_get_page(0);					// 한 페이지 크기 임시 커널 버퍼
-  	if (!kbuf)
-		sys_exit(-1);
+	/* stdout(1): 콘솔로 출력 */
+	if (fd == 1) {										
+		unsigned left = size;								/* 남은 바이트 */ 
+		unsigned wrote = 0;									/* 누적 출력 바이트 */
+		
+		char *kbuf = palloc_get_page(0);					/* 한 페이지 크기 임시 커널 버퍼 */
+		if (!kbuf) sys_exit(-1);
 
-  	while (left > 0) {									// 남은 데이터가 있을 동안 반복
-		size_t chunk = left > PGSIZE ? PGSIZE : left;	// 한번에 처리할 크기(최대 1페이지)
+		while (left > 0) {									/* 남은 데이터가 있을 동안 반복 */ 
+			size_t chunk = left > PGSIZE ? PGSIZE : left;	/* 한번에 처리할 크기(최대 1페이지) */
 
-		copy_in(kbuf, buffer, chunk);					// 유저 버퍼 -> 커널 버퍼로 안전 복사(검증 포함)
-		putbuf(kbuf, chunk);							// 콘솔로 출력
+			copy_in(kbuf, buffer, chunk);					/* 유저 버퍼 -> 커널 버퍼로 안전 복사(검증 포함) */
+			putbuf(kbuf, chunk);							/* 콘솔로 출력 */
 
-		buffer = (const uint8_t*)buffer + chunk;		// 유저 버퍼 포인터를 chunk만큼 전진
-		left -= chunk; 									// 남은 크기 감소
-		wrote += chunk;									// 누적 출력 크기 증가.
-  	}
-  	palloc_free_page(kbuf);								// 임시 페이지 해제
-	return (int)wrote;									// 출력한 바이트 수 반환(성공)
+			buffer = (const uint8_t*)buffer + chunk;		/* 유저 버퍼 포인터를 chunk만큼 전진 */
+			left -= chunk; 									/* 남은 크기 감소 */
+			wrote += chunk;									/* 누적 출력 크기 증가. */
+		}
+		palloc_free_page(kbuf);								/* 임시 페이지 해제 */
+		return (int)wrote;									/* 출력한 바이트 수 반환(성공) */
+	}
+
+	/* 파일 FD(>=2): 파일에 기록 */
+	struct file *f = fd_get (fd);
+	if (f == NULL) return -1;
+
+	unsigned left = size;			
+	unsigned wrote = 0;	
+
+	char *kbuf = palloc_get_page(0);	
+	if (!kbuf) sys_exit(-1);
+
+	while (left > 0) {
+		size_t ask = left > PGSIZE ? PGSIZE : left;			/* 이번에 시도할 쓰기 크기 */
+        copy_in(kbuf, buffer, ask);                 
+
+        lock_acquire(&fs_lock);                       
+        int n = file_write(f, kbuf, ask);            		/* 실제 파일에 쓰기 */
+        lock_release(&fs_lock);                       
+
+        if (n < 0) {                                  		/* 쓰기 실패 */
+            palloc_free_page(kbuf);
+            return -1;
+        }
+
+		buffer  = (const uint8_t*)buffer + n;         		/* 유저 포인터 전진 */
+        left   -= (unsigned)n; 
+		wrote  += (unsigned)n;                        
+                               
+        if ((unsigned)n < ask)                        		/* 파일이 덜 받았으면(가득 못 씀) 중단 */
+            break;
+	}
+
+	palloc_free_page(kbuf);
+	return (int)wrote;
+}
+
+/* 파일 위치 이동*/
+static void
+sys_seek (int fd, unsigned position) {
+	struct file *f = fd_get (fd);
+	if (f == NULL) return;
+
+	lock_acquire(&fs_lock);
+    file_seek (f, (off_t) position);      /* 파일 오프셋을 position으로 설정 */
+    lock_release(&fs_lock);
+}
+
+/* 현재 파일 위치 반환: 잘못된 fd면 (unsigned) -1 반환 */
+static unsigned
+sys_tell (int fd) {
+	struct file *f = fd_get (fd);
+	/* 반환형이 unsigned 인 함수에서 에러를 알릴 때는 호출자가 ret == (unsigned)-1 또는 ret == UINT_MAX 로 비교해야 함. 
+	 * -1 을 unsigned 로 바꾸면 그 타입의 최댓값.
+	 * 실패/에러를 나타내는 센티넬 값으로 씀. 의미상 UINT_MAX 와 같음
+	 */
+	if (f == NULL) return (unsigned) -1;
+
+	lock_acquire(&fs_lock);
+	off_t pos = file_tell (f);			/* 현 오프셋 */
+    lock_release(&fs_lock);
+
+	return (unsigned) pos;
 }
 
 static

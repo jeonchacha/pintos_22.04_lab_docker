@@ -21,6 +21,8 @@
         "palloc.h": "c",
         "filesys.h": "c",
         "init.h": "c",
-        "string.h": "c"
+        "string.h": "c",
+        "inode.h": "c",
+        "input.h": "c"
     }
 }
