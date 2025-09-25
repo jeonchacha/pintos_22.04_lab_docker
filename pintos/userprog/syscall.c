@@ -584,8 +584,9 @@ fd_close(int fd) {
     	file_close(t->fd_table[fd]);	/* 참조 끊기 & 실제 파일 닫기 */
     	lock_release(&fs_lock);
     	t->fd_table[fd] = NULL;			/* 테이블 슬롯 비우기 */
+		
     	if (fd < t->fd_next) { 
-			t->fd_next = fd; /* 앞자리 재사용 */
+			t->fd_next = fd; 			/* 앞자리 재사용 */
 		}
 	}
 

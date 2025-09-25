@@ -387,7 +387,7 @@ process_exit (void) {
     for (int fd = 2; fd < FD_MAX; fd++) {
         fd_close(fd);
     }
-
+	
 	process_cleanup ();
 }
 
@@ -395,7 +395,7 @@ process_exit (void) {
 static void
 process_cleanup (void) {
 	struct thread *curr = thread_current ();
-
+	
 #ifdef VM
 	supplemental_page_table_kill (&curr->spt);
 #endif

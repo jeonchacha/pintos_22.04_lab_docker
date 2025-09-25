@@ -23,6 +23,7 @@
         "init.h": "c",
         "string.h": "c",
         "inode.h": "c",
-        "input.h": "c"
+        "input.h": "c",
+        "*.inc": "c"
     }
 }
