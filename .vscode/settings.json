@@ -24,6 +24,14 @@
         "string.h": "c",
         "inode.h": "c",
         "input.h": "c",
-        "*.inc": "c"
+        "*.inc": "c",
+        "uninit.h": "c",
+        "debug.h": "c",
+        "array": "c",
+        "compare": "c",
+        "functional": "c",
+        "tuple": "c",
+        "type_traits": "c",
+        "utility": "c"
     }
 }

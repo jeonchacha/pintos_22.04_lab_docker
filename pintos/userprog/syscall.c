@@ -23,6 +23,8 @@
 #include "filesys/filesys.h"	// fs_lock, filesys_*
 #include "devices/input.h"		// input_getc() 
 
+#include "vm/vm.h"
+
 extern struct lock fs_lock;         /* filesys.c의 전역 락을 사용(하나만 써야 함) */
 
 void syscall_entry (void);
@@ -89,6 +91,9 @@ syscall_init (void) {
 */
 void
 syscall_handler (struct intr_frame *f) {
+#ifdef VM
+	thread_current()->user_rsp = f->rsp;	/* 유저 진입 컨텍스트의 RSP 저장 */
+#endif
 	uint64_t n = f->R.rax;
 
 	switch (n) {
@@ -457,8 +462,19 @@ copy_in (void *kdst, const void *usrc, size_t n) {
 		/* [2] u가 속한 페이지가 현재 프로세스의 페이지테이블에
 		 * '매핑되어 있는지' 확인하고, 커널에서 접근 가능한 커널 가상주소를 얻음. */
 		uint8_t *kva = pml4_get_page(thread_current ()->pml4, (void *)u);
-		if (!kva)						// 매핑이 없으면 즉시 -1 종료 
-			sys_exit(-1);
+		if (!kva) {						// 매핑이 없으면 즉시 -1 종료 -> vm에선 vm_try_handle_fault() 호출→한 번 더 pml4_get_page() 시도
+
+			// 2) VM에 페이지 요청(요청 로딩)
+            void *va = (void *) ((uintptr_t)u & ~PGMASK);
+            if (!vm_try_handle_fault(NULL, va, true, false, true)) {
+                sys_exit(-1);
+            }
+
+			// 3) 다시 시도
+			kva = pml4_get_page(thread_current ()->pml4, (void *)u);
+			if (!kva) sys_exit(-1);
+		}						
+			
 
 		size_t off = pg_ofs(u);			// u가 그 페이지에서 가지는 오프셋(0~PGSIZE-1)
 		size_t chunk = PGSIZE - off; 	// 이번 페이지 끝까지 얼마를 한번에 읽을 수 있는지 계산
@@ -484,9 +500,16 @@ copy_out (void *udst, const void *ksrc, size_t n) {
 		
 		/* [2] u가 가리키는 페이지가 매핑되었는지 확인하고 커널이 접근 가능한 주소를 얻음 */
 		uint8_t *kva = pml4_get_page(thread_current()->pml4, (void *)u);
-    	if (!kva) 
-			sys_exit(-1);
-
+    	if (!kva) {
+			void *va = (void *) ((uintptr_t)u & ~PGMASK);
+            // 쓰기 목적 접근 → write=true
+            if (!vm_try_handle_fault(NULL, va, true, true, true)) {
+                sys_exit(-1);
+            }
+            kva = pml4_get_page(thread_current()->pml4, (void *)u);
+            if (!kva) sys_exit(-1);
+		}
+		
 		size_t off = pg_ofs(u);
 		size_t chunk = PGSIZE - off;	// 이번 페이지에 쓸 수 있는 최대 크기
 		if (chunk > n) 
@@ -520,8 +543,18 @@ copy_in_string_alloc (const char *us) {
 		/* [2] p가 속한 페이지의 커널 접근 주소 */
 		uint8_t *kva = pml4_get_page(thread_current()->pml4, (void *)p);
 		if (!kva) {
-			palloc_free_page(kpage); 
-			sys_exit(-1); 
+			/* not-present → lazy 로딩 시도 (user=true, write=false) */
+            void *va = (void *)((uintptr_t)p & ~PGMASK);
+            if (!vm_try_handle_fault(NULL, va, true, false, true)) {
+                palloc_free_page(kpage);
+                sys_exit(-1);
+            }
+            kva = pml4_get_page(thread_current()->pml4, (void *)p);
+			
+			if (!kva) {
+				palloc_free_page(kpage); 
+				sys_exit(-1);
+			} 
 		}
 
 		size_t off = pg_ofs(p);					// 페이지 내 오프셋

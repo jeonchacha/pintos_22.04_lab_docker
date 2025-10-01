@@ -2,6 +2,21 @@
 
 #include "vm/vm.h"
 #include "devices/disk.h"
+#include <string.h>
+#include <stdbool.h>
+#include "threads/vaddr.h"		// is_user_vaddr, pg_ofs, PGSIZE
+
+/* 스왑 디스크 (후속 단계에서 사용할 예정) */
+static struct disk *swap_disk;
+
+/* 앞으로 쓸, "제로로 채우는" init 콜백(UNINIT.initialize가 호출해줌) */
+bool anon_init_zero (struct page *page, void *aux) {
+	/* vm_do_claim_page()에서 이미 PTE 매핑과 frame 배정이 끝났고,
+       지금은 UNINIT.swap_in(=uninit_initialize) 내부에서 불리는 'init' 콜백 단계.
+       따라서 page->frame->kva로 바로 쓸 수 있음. */
+	memset(page->frame->kva, 0, PGSIZE);
+	return true;
+}
 
 /* DO NOT MODIFY BELOW LINE */
 static struct disk *swap_disk;
@@ -24,13 +39,12 @@ vm_anon_init (void) {
 	swap_disk = NULL;
 }
 
-/* Initialize the file mapping */
+/* 타입 초기화기: ops만 세팅해 타입을 VM_ANON으로 바꿔준다.
+   실제 내용 채우기는 'init 콜백'(위 anon_init_zero)에서 수행. */
 bool
 anon_initializer (struct page *page, enum vm_type type, void *kva) {
-	/* Set up the handler */
 	page->operations = &anon_ops;
-
-	struct anon_page *anon_page = &page->anon;
+	return true;
 }
 
 /* Swap in the page by read contents from the swap disk. */

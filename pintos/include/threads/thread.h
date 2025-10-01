@@ -118,6 +118,9 @@ struct thread {
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
+
+	void *stack_bottom;		/* 현재 프로세스의 스택이 가장 아래로 내려간 경계(가장 낮은 매핑 주소) */
+	uint64_t user_rsp;		/* 최근 유저->커널 전환 시점에서의 유저 RSP 백업 */
 #endif
 
 	/* Owned by thread.c. */

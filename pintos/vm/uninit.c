@@ -62,7 +62,12 @@ uninit_initialize (struct page *page, void *kva) {
  * PAGE will be freed by the caller. */
 static void
 uninit_destroy (struct page *page) {
-	struct uninit_page *uninit UNUSED = &page->uninit;
-	/* TODO: Fill this function.
-	 * TODO: If you don't have anything to do, just return. */
+	 /* 아직 실체화되지 않은(uninit) 페이지가 종료될 때 호출됨.
+      * 우리가 malloc으로 만든 aux를 정리. */
+	 struct uninit_page *u = &page->uninit;
+	 if (u->aux) {
+		free(u->aux);
+		u->aux = NULL;
+	 }
+	 /* 나머지 타입별 정리는 실제 타입 destroy에서 처리되므로 여기선 끝. */
 }

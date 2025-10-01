@@ -7,6 +7,7 @@
 #include "intrinsic.h"
 #include "userprog/syscall.h"
 #include "threads/vaddr.h"   /* is_user_vaddr() */
+#include "vm/vm.h"			 /* vm_try_handle_fault() */
 
 /* Number of page faults processed. */
 static long long page_fault_cnt;
@@ -132,16 +133,21 @@ page_fault (struct intr_frame *f) {
 	   be assured of reading CR2 before it changed). */
 	intr_enable ();
 
-
 	/* Determine cause. */
 	not_present = (f->error_code & PF_P) == 0;
 	write = (f->error_code & PF_W) != 0;
 	user = (f->error_code & PF_U) != 0;
 
 #ifdef VM
-	/* For project 3 and later. */
-	if (vm_try_handle_fault (f, fault_addr, user, write, not_present))
-		return;
+	/* user fault면 RSP 갱신(보조 안전장치) */
+	if (user) {
+		thread_current()->user_rsp = f->rsp;
+	}
+	/* VM 시도: 존재한지 않는 페이지만 복구를 시도 */
+	if (not_present) {
+		if (vm_try_handle_fault (f, fault_addr, user, write, not_present))
+			return;		/* 성공적으로 페이지를 채웠으니 복귀 */
+	}
 #endif
 
 	/* Count page faults. */
