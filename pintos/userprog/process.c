@@ -18,9 +18,12 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+
 #ifdef VM
 #include "vm/vm.h"
+#include "vm/file.h"
 #endif
+
 #include "threads/malloc.h"
 #include "threads/synch.h"
 #include "userprog/syscall.h"
@@ -402,6 +405,13 @@ process_cleanup (void) {
 	struct thread *curr = thread_current ();
 	
 #ifdef VM
+	/* 1) 모든 mmap 구간을 범위 단위로 언매핑 (더티만 write-back + region/free) */
+	while (!list_empty(&curr->mmaps)) {
+		struct mmap_region *r = list_entry(list_front(&curr->mmaps), struct mmap_region, elem);
+		do_munmap(r->start);	/* 파일 write-back + SPT/PTE 정리 + 리스트 제거 */
+	}
+
+	/* 2) 남아 있는 SPT 엔트리 정리 (타입별 destroy 호출) */
 	supplemental_page_table_kill (&curr->spt);
 #endif
 

@@ -6,14 +6,6 @@
 #include <stdbool.h>
 #include "filesys/file.h"
 
-/* 실행 파일/파일-백드 페이지 하나를 채우는 데 필요한 메타데이터 */
-struct file_lazy_aux {
-	struct file *file;		/* 실행 파일(또는 mmap 파일) 핸들 */
-	off_t ofs;				/* 이 페이지의 파일 오프셋 */
-	size_t read_bytes;		/* 이 페이지에서 파일에서 실제로 읽을 바이트 수 */
-	size_t zero_bytes;		/* 이어서 0으로 채울 바이트 수 */
-};
-
 /* 부모-자식 간 대기/종료 상태 공유 목적 */
 struct wait_status {
     tid_t tid;                  /* 자식 tid */

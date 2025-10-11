@@ -457,6 +457,11 @@ init_thread (struct thread *t, const char *name, int priority) {
 	memset(t->fd_table, 0, sizeof t->fd_table); // 중복
 	t->running_exe = NULL;						// 중복
 #endif
+
+#ifdef VM
+	/* mmap 영역 리스트(커널 스레드도 빈 리스트면 안전) */
+	list_init(&t->mmaps);
+#endif
 }
 
 /* Chooses and returns the next thread to be scheduled.  Should

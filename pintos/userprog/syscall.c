@@ -24,11 +24,15 @@
 #include "devices/input.h"		// input_getc() 
 
 #include "vm/vm.h"
+#include "vm/file.h"
 
 extern struct lock fs_lock;         /* filesys.c의 전역 락을 사용(하나만 써야 함) */
 
 void syscall_entry (void);
 void syscall_handler (struct intr_frame *);
+
+static void *sys_mmap (void *addr, size_t length, int writable, int fd, off_t offset);
+static void  sys_munmap (void *addr);
 
 static void sys_halt (void);
 static tid_t sys_fork (const char *name, struct intr_frame *f);
@@ -97,6 +101,13 @@ syscall_handler (struct intr_frame *f) {
 	uint64_t n = f->R.rax;
 
 	switch (n) {
+		case SYS_MMAP:
+        	f->R.rax = (uint64_t) sys_mmap((void *) f->R.rdi, (size_t) f->R.rsi,
+                                       	   (int) f->R.rdx, (int) f->R.r10, (off_t) f->R.r8);
+        	break;
+    	case SYS_MUNMAP:
+			sys_munmap((void *) f->R.rdi);
+			break;
 		case SYS_HALT:
 			sys_halt ();
 			NOT_REACHED ();
@@ -148,6 +159,20 @@ syscall_handler (struct intr_frame *f) {
 		default:
 			sys_exit (-1);
 	}
+}
+
+static void *
+sys_mmap (void *addr, size_t length, int writable, int fd, off_t offset) {
+	if (fd == 0 || fd == 1) return NULL; 	/* 콘솔은 매핑 불가 */
+	struct file *f = fd_get(fd);
+	if (f == NULL) return NULL;
+	return do_mmap(addr, length, writable, f, offset);
+}
+
+static void
+sys_munmap (void *addr) {
+	if (addr == NULL) return;
+	do_munmap(addr);
 }
 
 static void 
@@ -493,27 +518,39 @@ static void
 copy_out (void *udst, const void *ksrc, size_t n) {
 	const uint8_t *k = ksrc;			// 커널 소스 버퍼(바이트 단위 진행)
 	uint8_t *u = udst;					// 유저 목적지 버퍼
+	struct thread *t = thread_current();
+	struct supplemental_page_table *spt = &t->spt;
 
 	while (n > 0) {
 		if (!is_user_vaddr(u))			// [1] 유저 목적지가 사용자 가상영역인지 확인
 			sys_exit(-1);
 		
-		/* [2] u가 가리키는 페이지가 매핑되었는지 확인하고 커널이 접근 가능한 주소를 얻음 */
-		uint8_t *kva = pml4_get_page(thread_current()->pml4, (void *)u);
-    	if (!kva) {
-			void *va = (void *) ((uintptr_t)u & ~PGMASK);
-            // 쓰기 목적 접근 → write=true
-            if (!vm_try_handle_fault(NULL, va, true, true, true)) {
-                sys_exit(-1);
-            }
-            kva = pml4_get_page(thread_current()->pml4, (void *)u);
-            if (!kva) sys_exit(-1);
-		}
-		
+		/* 현재 바이트가 속한 페이지의 VA(페이지 경계)와 이번에 다룰 길이 */
+		void *va = (void *) ((uintptr_t)u & ~PGMASK);
 		size_t off = pg_ofs(u);
 		size_t chunk = PGSIZE - off;	// 이번 페이지에 쓸 수 있는 최대 크기
 		if (chunk > n) 
 			chunk = n;
+
+		/* SPT에서 페이지 찾고, 없거나 프레임 없으면 '쓰기 목적'으로 폴트 처리 */
+		struct page *p = spt_find_page(spt, va);
+		if (!p || !p->frame) {
+			if (!vm_try_handle_fault(NULL, va, true, true, true))
+            	sys_exit(-1);
+            
+			p = spt_find_page(spt, va);
+			if (!p || !p->frame) 
+				sys_exit(-1);
+		}
+
+		/* 유저 관점 쓰기 허용 여부 강제 체크 */
+		if (!p->writable)
+			sys_exit(-1);
+
+		/* 커널에서 접근 가능한 주소 얻어 실제 복사 */
+		uint8_t *kva = pml4_get_page(t->pml4, u);
+		if (!kva)
+			sys_exit(-1);
 
 		memcpy(kva, k, chunk);	// [3] 커널 버퍼에서 유저 페이지로 chunk 바이트 복사
 		u += chunk; 

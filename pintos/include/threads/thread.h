@@ -121,6 +121,10 @@ struct thread {
 
 	void *stack_bottom;		/* 현재 프로세스의 스택이 가장 아래로 내려간 경계(가장 낮은 매핑 주소) */
 	uint64_t user_rsp;		/* 최근 유저->커널 전환 시점에서의 유저 RSP 백업 */
+
+	struct list mmaps;		/* mmap된 영역들을 한 덩어리(region)씩 추적 */
+	/* 프로세스 종료 시 모든 매핑을 한 번에 언매핑해야 하므로 지역 목록이 필요.
+	 * region 단위로 파일 참조를 정리하려면 thread에 한 데 묶어둬야 편함. */
 #endif
 
 	/* Owned by thread.c. */
