@@ -66,7 +66,7 @@ file_lazy_load (struct page *page, void *aux_) {
 		lock_release(&fs_lock);
 
 		if (n != (int)fp->read_bytes) {
-			free(aux);
+			// free(aux);
 			return false;
 		}
 	}
@@ -75,6 +75,9 @@ file_lazy_load (struct page *page, void *aux_) {
 	}
 
 	free(aux); 		/* 1회성 aux는 여기서 수거 */
+
+	page->uninit.aux = NULL;
+	
 	return true;
 }
 
@@ -85,8 +88,7 @@ file_backed_swap_in (struct page *page, void *kva) {
 	struct file_page *fp = &page->file;
 	if (fp->read_bytes > 0) {
 		lock_acquire(&fs_lock);
-		file_seek(fp->file, fp->ofs);
-		int n = file_read(fp->file, kva, (int)fp->read_bytes);
+		int n = file_read_at(fp->file, kva, (int)fp->read_bytes, fp->ofs);
 		lock_release(&fs_lock);
 
 		if (n != (int)fp->read_bytes) return false;
@@ -102,29 +104,45 @@ file_backed_swap_in (struct page *page, void *kva) {
 /* 축출 시: dirty면 파일로 write-back */
 static bool
 file_backed_swap_out (struct page *page) {
-	struct thread *t = thread_current();
-	struct file_page *fp = &page->file;
+	
+	struct frame *fr = page->frame;
+	/* thread_current()->pml4 대신, 프레임 주인의 pml4 사용 */
+	uint64_t *owner_pml4 = fr ? fr->pml4 : thread_current()->pml4;
 
 	/* 하드웨어 dirty 비트로 판단 */
-	if (pml4_is_dirty(t->pml4, page->va)) {
+	if (pml4_is_dirty(owner_pml4, page->va)) {
+		struct file_page *fp = &page->file;
 		lock_acquire(&fs_lock);
-		file_seek(fp->file, fp->ofs);
 
 		/* 파일 끝을 넘어서는 부분은 기록하면 안됨 -> read_bytes 만큼만 write-back */
-		int n = file_write(fp->file, page->frame->kva, (int)fp->read_bytes);
+		/* seek+write  대신 write_at 사용 -> 포지션 공유/실수 차단 */
+		(void)file_write_at(fp->file, fr->kva, (int)fp->read_bytes, fp->ofs);
 		lock_release(&fs_lock);
-		/* 부분 실패에 대한 회복은 여기서 강하게 요구되지 않음 */
 
-		pml4_set_dirty(t->pml4, page->va, false);
+		pml4_set_dirty(owner_pml4, page->va, false);
 	}
-
-	return true;
+	return true;	/* PTE clear 와 frame 연결해제는 vm_evict_frame()에서 */
 }
 
-/* Destory the file backed page. PAGE will be freed by the caller. */
-/* 페이지 제거: region이 파일 닫기를 담당하므로 여기서는 아무 것도 안 함 */
+/* 페이지 제거: region이 파일 닫기를 담당하므로 여기서는 아무 것도 안 함 
+ * 파일 백드 페이지도 프레임을 깨끗한 빈 슬롯으로 만들고 남김. 
+ * (파일 close/write-back은 이미 do_munmap()/region 레벨에서 처리) */
 static void
 file_backed_destroy (struct page *page) {
+	if (page->frame) {
+    	struct frame *fr = page->frame;
+        /* pml4 가 아직 유효할 때만 클리어 (do_munmap 쪽에서 이미 클리어했어도 무해) */
+        if (fr->pml4 && page->va)
+            pml4_clear_page(fr->pml4, page->va);
+        /* 프레임을 빈 상태로 */
+        fr->page = NULL;
+        fr->pml4 = NULL;
+        page->frame = NULL;
+    }
+
+	/* 파일 핸들/매핑 정리는 상위에서: 
+     - 실행 파일: process_cleanup()
+     - mmap 파일: do_munmap()  */
 }
 
 /* Do the mmap */
@@ -273,14 +291,22 @@ do_munmap (void *addr) {
 		if (p->frame && pml4_is_dirty(t->pml4, va)) {
 			struct file_page *fp = &p->file;
 			lock_acquire(&fs_lock);
-			file_seek(fp->file, fp->ofs);
-			(void) file_write(fp->file, p->frame->kva, (int)fp->read_bytes);
+			(void) file_write_at(fp->file, p->frame->kva, (int)fp->read_bytes, fp->ofs);
 			lock_release(&fs_lock);
 			pml4_set_dirty(t->pml4, va, false);
 		}
 
 		/* 실제 매핑을 걷고, SPT에서 제거(타입별 destroy 호출 포함) */
 		pml4_clear_page(t->pml4, va);
+
+		/* 프레임이 붙어 있으면 프레임도 고아되지 않게 끊어준다. */
+	    if (p->frame) {
+    		struct frame *fr = p->frame;
+     		fr->page = NULL;
+      		fr->pml4 = NULL;
+      		p->frame = NULL;
+    	}
+
 		spt_remove_page(&t->spt, p);
 	}
 

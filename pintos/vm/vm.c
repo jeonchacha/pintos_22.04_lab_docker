@@ -13,6 +13,15 @@
 
 #include "userprog/process.h" 		/* file_lazy_aux */
 
+#include "lib/kernel/list.h"
+#include "threads/synch.h"
+
+#include "devices/disk.h"
+#include "filesys/file.h"
+
+static struct list frame_table; 	/* 모든 유저 프레임 */
+static struct lock frame_lock;		/* frame_table 보호 */
+
 extern struct lock fs_lock;
 
 /* ---------- SPT 해시용 보조 함수들 ---------- */
@@ -44,6 +53,10 @@ void
 vm_init (void) {
 	vm_anon_init ();	/* 익명 페이지 ops 등록 */
 	vm_file_init ();	/* 파일 페이지 ops 등록 */
+
+	list_init(&frame_table);
+	lock_init(&frame_lock);
+
 #ifdef EFILESYS  /* For project 4 */
 	pagecache_init ();
 #endif
@@ -130,7 +143,6 @@ vm_alloc_page_with_initializer (enum vm_type type, void *upage, bool writable,
 
 	/* uninit_new가 page를 다시 덮어쓰므로 ‘이후’에 writable 세팅 */
 	page->writable = writable;
-	page->type = VM_UNINIT;
 
 	/* SPT에 등록 */
 	if (!spt_insert_page (spt, page)) {
@@ -188,29 +200,86 @@ vm_get_victim (void) {
  * Return NULL on error.*/
 static struct frame *
 vm_evict_frame (void) {
-	struct frame *victim UNUSED = vm_get_victim ();
-	/* TODO: swap out the victim and return the evicted frame. */
+	/* victim을 swap_out하고 프레임 반환 */
+	
+	/* 아주 단순한 second-chance */
+	lock_acquire(&frame_lock);
+	ASSERT(!list_empty(&frame_table));
 
-	/* 추후: victim을 swap_out하고 프레임 반환 */
+	struct frame *victim = NULL;
 
-	return NULL;
+	/* 한 바퀴 돌며 accessed=0 인 것 선택, 있으면 그걸, 없으면 첫 번째 */
+	for (int pass = 0; pass < 2 && victim == NULL; pass++) {
+		for (struct list_elem *e = list_begin(&frame_table); 
+			 e != list_end(&frame_table); e = list_next(e)) {
+
+			struct frame *f = list_entry(e, struct frame, elem);
+			if (f->page == NULL) {	/* 이미 비어있으면 재사용 */
+				victim = f;
+				break;
+			}
+
+			bool acc = pml4_is_accessed(f->pml4, f->page->va);
+			if (pass == 0 && acc) {
+				pml4_set_accessed(f->pml4, f->page->va, false);
+				continue;
+			}
+			victim = f;
+			break;
+		}
+	}
+	ASSERT(victim != NULL);
+
+	struct page *p = victim->page;
+	/* 이미 비어있는 프레임은 디스크 I/O 없이 즉시 재사용 
+	 * (NULL 페이지에 대해 swap_out 금지) */
+	if (p == NULL) {
+		victim->pml4 = NULL;
+		lock_release(&frame_lock);
+		return victim;
+	}
+
+	/* 타입별 백스토어로 밀어내기*/
+	bool ok = swap_out(p);		/* == p->operations->swap_out(p) */
+	ASSERT(ok);
+
+	/* 매핑 제거와 연결 해제는 여기서 통일 처리(핸들러는 파일/디스크 I/O만 하도록) */
+	if (victim->pml4 && p && p->va)
+		pml4_clear_page(victim->pml4, p->va);
+	
+	p->frame = NULL;
+	victim->page = NULL;
+	victim->pml4 = NULL;
+
+	/* 핵심 포인트: swap_out()은 백스토어 I/O만 담당시키고, 
+	 * PTE 해제(pml4_clear_page)와 연결 끊기는 vm_evict_frame()에서 일괄 처리.
+	 * (mmap의 do_munmap()처럼 “명시적 언매핑”은 그 루틴 안에서 clear하는 게 맞고) */
+
+	lock_release(&frame_lock);
+	return victim;		/* victim->kva를 재사용해서 반환 */
 }
 
-/* palloc()으로 유저 풀에서 프레임 1개를 확보해 frame 객체를 리턴 */
+/* palloc()으로 유저 풀에서 프레임 1개를 확보해 frame 객체를 리턴
+ * 실패하면 퇴출
+ */
 static struct frame *
 vm_get_frame (void) {
+	void *kva = palloc_get_page (PAL_USER);	/* 유저 풀에서 물리 페이지 1장 할당 */
+	if (kva == NULL) {
+		return vm_evict_frame(); 			/* 희생 프레임을 비워서 재사용 */
+	}
+
 	struct frame *frame = malloc (sizeof *frame);
 	ASSERT (frame != NULL);
 
-	/* 유저 풀에서 물리 페이지 1장 할당(0으로 지울 필요는 아직 없음) */
-	void *kva = palloc_get_page (PAL_USER);
-	if (kva == NULL) {
-		/* 나중엔 evict 시도 -> 실패 시 kill. 지금은 바로 실패 처리 */
-		free (frame);
-		return NULL;
-	}
 	frame->kva = kva;		/* 커널 가상주소 기록 */
 	frame->page = NULL;		/* 아직 소유 page 없음 */
+	frame->pml4 = NULL;
+
+	lock_acquire(&frame_lock);
+	list_push_back(&frame_table, & frame->elem);
+	lock_release(&frame_lock);
+
 	return frame;
 }
 
@@ -340,8 +409,7 @@ static bool
 vm_do_claim_page (struct page *page) {
 	/* 프레임(물리 페이지) 하나 확보 */
 	struct frame *frame = vm_get_frame ();
-	if (frame == NULL)
-		return false;
+	if (frame == NULL) return false;
 
 	/* 연결(서로 역참조) */
 	frame->page = page;
@@ -360,6 +428,9 @@ vm_do_claim_page (struct page *page) {
 		return false;
 	}
 
+	frame->pml4 = thread_current()->pml4;	/* 페이지 클레임 시 프레임<->pml4 연결
+											 * dirty/accessed 주인 기록 */
+
 	/* 실제 콘텐츠 채우기:
 	   - UNINIT: init()을 통해 실제 타입으로 전환 후 내용 적재
 	   - ANON : swap에서 끌어오거나(초기엔 zero-fill)
@@ -374,7 +445,6 @@ vm_do_claim_page (struct page *page) {
 		free (frame);
 		return false;
 	}
-
 	return true;
 }
 
@@ -410,7 +480,8 @@ supplemental_page_table_copy (struct supplemental_page_table *dst,
 			vm_initializer *init = src_page->uninit.init;	/* 최초 fault 시 호출될 초기화자 그대로 사용 */
 			void *aux = NULL;								/* 보조 데이터는 타입별로 다르게 */
 
-			if (type == VM_FILE) {							/* UNINIT(파일-백드): aux 깊은복사 + 파일 핸들 분리 */
+			/* init이 파일 기반 lazy 로더라면 aux를 깊은 복사 (type이 VM_ANON이든 VM_FILE이든 상관없이) */
+			if (src_page->uninit.aux != NULL) {	/* UNINIT(파일-백드): aux 깊은복사 + 파일 핸들 분리 */
 				struct file_lazy_aux *saux = src_page->uninit.aux;
 				struct file_lazy_aux *daux = malloc(sizeof *daux);
 				if (!daux) return false;
@@ -434,14 +505,17 @@ supplemental_page_table_copy (struct supplemental_page_table *dst,
 
 			/* 새 UNINIT 페이지 예약(lazy 로딩 유지) */
 			if (!vm_alloc_page_with_initializer(type, va, writable, init, aux)) {
-				if (type == VM_FILE && aux) {			/* 실패 시 자원 정리 */
+				if (aux) {			/* 실패 시 자원 정리 */
 					struct file_lazy_aux *daux = aux;		
 					lock_acquire(&fs_lock);
 					file_close(daux->file);
 					lock_release(&fs_lock);
+
+					free(daux);
 				}
 				return false;
 			}
+
 			/* UNINIT은 여기서 끝. 아직 프레임 할당/매핑 없음 */
 			continue;
 		}
@@ -455,9 +529,27 @@ supplemental_page_table_copy (struct supplemental_page_table *dst,
 				return false;
 
 			struct page *dst_page = spt_find_page(dst, va); 	/* 자식 페이지(프레임 보유) */
-			ASSERT(dst_page && dst_page->frame && src_page->frame);
+			ASSERT(dst_page && dst_page->frame);
 
-			memcpy(dst_page->frame->kva, src_page->frame->kva, PGSIZE);		/* KVA <-> KVA 복사(가장 안전) */
+			if (src_page->frame) {
+				memcpy(dst_page->frame->kva, src_page->frame->kva, PGSIZE);		/* KVA <-> KVA 복사(가장 안전) */
+			} else {
+				/* 부모가 스왑에 밀려난 경우: 슬롯에서 '읽기만' 해서 자식 KVA 채우기 */
+				size_t slot = src_page->anon.swap_slot;
+				if (slot == SIZE_MAX) {
+					/* 극히 드문 케이스: 프레임도 없고 슬롯도 없음 -> 제로로 간주 */
+					memset(dst_page->frame->kva, 0, PGSIZE);
+				} else {
+					/* 스왑 디스크에서 읽어오기 (슬롯은 그대로 유지) */
+					struct disk *sd = disk_get(1, 1);
+					size_t sectors = PGSIZE / DISK_SECTOR_SIZE; /* 8 */
+					for (size_t i = 0; i < sectors; i++) {
+						disk_read(sd, slot * sectors + i,
+								  (uint8_t *)dst_page->frame->kva + i * DISK_SECTOR_SIZE);
+					}
+				}
+			}
+			
 			continue;
 		}
 
@@ -466,15 +558,30 @@ supplemental_page_table_copy (struct supplemental_page_table *dst,
                테스트/단계상 스왑/쓰기-회수 미구현이면, 가장 단순하고 견고한 방법은
                "자식 쪽은 사본(ANON)으로 만들어 즉시 복제"하는 것.
                (fork 후 자식이 해당 페이지를 수정해도 파일에 쓰기-회수 안 함이 자연스러움) */
+
+			/* 자식은 사본 보장을 위해 ANON으로 만들어 채운다(읽기 전용이면 writable=false로 보호됨). */
 			if (!vm_alloc_page_with_initializer(VM_ANON, va, writable, NULL, NULL))
                 return false;
             if (!vm_claim_page(va))
                 return false;
 
             struct page *dst_page = spt_find_page(dst, va);
-            ASSERT(dst_page && dst_page->frame && src_page->frame);
+            ASSERT(dst_page && dst_page->frame);
 
-            memcpy(dst_page->frame->kva, src_page->frame->kva, PGSIZE);
+			if (src_page->frame) {
+				memcpy(dst_page->frame->kva, src_page->frame->kva, PGSIZE);
+			} else {
+				/* 파일 메타로 원본 바이트를 읽어 채움 (write-back된 최신 상태와 일치) */
+				struct file_page *fp = &src_page->file;
+				lock_acquire(&fs_lock);
+				int n = file_read_at(fp->file, dst_page->frame->kva,
+									 (int)fp->read_bytes, fp->ofs);
+				lock_release(&fs_lock);
+				if (n != (int)fp->read_bytes) return false;
+				if (fp->zero_bytes)
+					memset((uint8_t *)dst_page->frame->kva + fp->read_bytes, 0, fp->zero_bytes);
+			}
+            
 			continue;
 
 			/* 나중에 mmap/페이지캐시/dirty write-back 구현 시

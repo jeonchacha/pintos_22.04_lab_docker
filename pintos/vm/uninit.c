@@ -10,6 +10,10 @@
 
 #include "vm/vm.h"
 #include "vm/uninit.h"
+#include "userprog/process.h" /* struct file_lazy_aux */
+#include "filesys/file.h"
+
+extern struct lock fs_lock;
 
 static bool uninit_initialize (struct page *page, void *kva);
 static void uninit_destroy (struct page *page);
@@ -70,4 +74,5 @@ uninit_destroy (struct page *page) {
 		u->aux = NULL;
 	 }
 	 /* 나머지 타입별 정리는 실제 타입 destroy에서 처리되므로 여기선 끝. */
+
 }

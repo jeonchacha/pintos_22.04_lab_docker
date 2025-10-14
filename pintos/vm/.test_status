@@ -1,5 +1,5 @@
 exec-bad-ptr PASS
-swap-iter FAIL
+swap-iter PASS
 sm-full PASS
 rox-simple PASS
 page-linear PASS
@@ -22,13 +22,13 @@ mmap-overlap PASS
 create-normal PASS
 priority-donate-lower PASS
 mmap-misalign PASS
-swap-anon FAIL
+swap-anon PASS
 bad-write PASS
 open-twice PASS
 page-shuffle PASS
 exec-arg PASS
 exec-missing PASS
-page-merge-mm PASS
+page-merge-mm FAIL
 read-bad-ptr PASS
 create-long PASS
 mmap-read PASS
@@ -46,7 +46,7 @@ pt-bad-read PASS
 priority-condvar PASS
 priority-donate-nest PASS
 rox-child PASS
-page-merge-par PASS
+page-merge-par FAIL
 mmap-write PASS
 alarm-single PASS
 lazy-file PASS
@@ -61,7 +61,7 @@ mmap-zero-len PASS
 open-null PASS
 page-parallel PASS
 sm-seq-random PASS
-page-merge-stk PASS
+page-merge-stk FAIL
 bad-write2 PASS
 sm-seq-block PASS
 multi-recurse PASS
@@ -110,7 +110,7 @@ priority-change PASS
 write-boundary PASS
 wait-killed PASS
 lg-full PASS
-swap-file FAIL
+swap-file PASS
 close-bad-fd PASS
 alarm-negative PASS
 multi-child-fd PASS

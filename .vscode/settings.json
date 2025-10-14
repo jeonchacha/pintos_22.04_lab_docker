@@ -35,6 +35,8 @@
         "utility": "c",
         "vm.h": "c",
         "file.h": "c",
-        "system_error": "c"
+        "system_error": "c",
+        "list.h": "c",
+        "disk.h": "c"
     }
 }

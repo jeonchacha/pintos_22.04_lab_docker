@@ -32,6 +32,7 @@ enum vm_type {
 #endif
 
 #include "hash.h"
+#include "threads/mmu.h" /* pml4 */
 
 struct page_operations;
 struct thread;
@@ -66,6 +67,9 @@ struct page {
 struct frame {
 	void *kva;			// 이 프레임의 커널 가상주소(커널이 이 물리 페이지에 접근할 때 사용)
 	struct page *page;	// 이 프레임을 점유 중인 상응하는 'struct page'(없으면 NULL)
+
+	struct list_elem elem;	/* frame_table 연결용 */
+	uint64_t *pml4; 		/* 이 프레임을 매핑한 페이지테이블(더 정확한 dirty/accessed 판정용) */
 };
 
 /* 각 페이지 타입이 구현해야 하는 인터페이스(연산 테이블).

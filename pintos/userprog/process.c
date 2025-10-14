@@ -259,6 +259,7 @@ __do_fork (void *aux_) {							/* 자식 스레드 본체: thread_create가 이 
 
 #ifdef VM
 	supplemental_page_table_init (&current->spt);
+
 	if (!supplemental_page_table_copy (&current->spt, &parent->spt)) {
 		ok = false;
 		goto out;
@@ -841,7 +842,7 @@ install_page (void *upage, void *kpage, bool writable) {
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
 
-static bool
+bool
 lazy_load_segment (struct page *page, void *aux_) {
 	/* TODO: 파일에서 세그먼트를 로드하세요. */
 	/* TODO: 이 함수는 주소 VA에서 첫 번째 페이지 폴트가 발생했을 때 호출됩니다. */
@@ -853,11 +854,22 @@ lazy_load_segment (struct page *page, void *aux_) {
 	/* 1) 프레임은 vm_claim_page()에서 잡아줌 */
 	void *kva = page->frame->kva;
 
+	/* 최종 타입 확인: UNINIT 단계지만 page_get_type()은 uninit.type을 돌려줌. */
+	enum vm_type final = page_get_type(page);
+	if (final == VM_FILE) {
+		/* 오직 파일 백드 페이지에서만 file union을 만짐 */
+		struct file_page *fp = &page->file;
+		fp->file = aux->file;
+		fp->ofs = aux->ofs;
+		fp->read_bytes = aux->read_bytes;
+		fp->zero_bytes = aux->zero_bytes;
+	}
+	/* final == VM_ANON 인 경우에는 union을 건드리지 않음. (데이터만 읽어 채움) */
+	
 	/* 2) 파일에서 읽기 */
 	if (aux->read_bytes > 0) {
 		lock_acquire(&fs_lock);
-		file_seek(aux->file, aux->ofs);
-		int n = file_read(aux->file, kva, (int)aux->read_bytes);
+		int n = file_read_at(aux->file, kva, (int)aux->read_bytes, aux->ofs);
 		lock_release(&fs_lock);
 		if (n != (int)aux->read_bytes) {	/* 정확히 못 읽으면 실패 */
 			goto done;
@@ -874,6 +886,9 @@ lazy_load_segment (struct page *page, void *aux_) {
 
 done:
 	free(aux);	/* 5) 1회성 aux는 더 이상 필요 없으니 해제 */
+
+	page->uninit.aux = NULL;
+	
 	return ok;
 }
 
@@ -914,11 +929,14 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		aux->zero_bytes = page_zero_bytes;					/* 이어서 0으로 채울 크기 */
 
 		/* SPT에 "lazy 파일-백드 페이지" 등록만 수행 (실제 로딩은 최초 접근 시 lazy_load_segment에서) */
-		if (!vm_alloc_page_with_initializer (VM_FILE, upage, writable, lazy_load_segment, aux)) {
+		/* 실행 파일의 쓰기 가능 세그먼트는 스왑(개인 사본)이 필요 → VM_ANON
+         * 읽기 전용은 필요 시 파일에서 재로딩하면 되므로 → VM_FILE */
+		enum vm_type pagetype = writable ? VM_ANON : VM_FILE;
+		if (!vm_alloc_page_with_initializer (pagetype, upage, writable, lazy_load_segment, aux)) {
 			free(aux);
 			return false;
 		}
-
+		
 		/* 다음 페이지로 이동. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
