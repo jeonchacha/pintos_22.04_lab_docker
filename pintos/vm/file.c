@@ -75,9 +75,6 @@ file_lazy_load (struct page *page, void *aux_) {
 	}
 
 	free(aux); 		/* 1회성 aux는 여기서 수거 */
-
-	page->uninit.aux = NULL;
-	
 	return true;
 }
 

@@ -886,9 +886,6 @@ lazy_load_segment (struct page *page, void *aux_) {
 
 done:
 	free(aux);	/* 5) 1회성 aux는 더 이상 필요 없으니 해제 */
-
-	page->uninit.aux = NULL;
-	
 	return ok;
 }
 
